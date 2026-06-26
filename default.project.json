@@ -1,0 +1,116 @@
+{
+  "name": "CodeRed_HackathonHorror",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Assets": {
+        "$path": "assets"
+      },
+      "Remotes": {
+        "$className": "Folder",
+        "GameStateChanged": { "$className": "RemoteEvent" },
+        "PhaseTimerSync": { "$className": "RemoteEvent" },
+        "PlayerJoinedLobby": { "$className": "RemoteEvent" },
+        "QueueUpdate": { "$className": "RemoteEvent" },
+        "MatchFound": { "$className": "RemoteEvent" },
+        "StartGame": { "$className": "RemoteEvent" },
+        "InventoryUpdated": { "$className": "RemoteEvent" },
+        "PickupItem": { "$className": "RemoteEvent" },
+        "UseItem": { "$className": "RemoteEvent" },
+        "DropItem": { "$className": "RemoteEvent" },
+        "CodingProgress": { "$className": "RemoteEvent" },
+        "CodingTaskComplete": { "$className": "RemoteEvent" },
+        "NPCDialogueTrigger": { "$className": "RemoteEvent" },
+        "NPCDialogueChoice": { "$className": "RemoteEvent" },
+        "QuestUpdate": { "$className": "RemoteEvent" },
+        "QuestComplete": { "$className": "RemoteEvent" },
+        "PlayerDamaged": { "$className": "RemoteEvent" },
+        "PlayerDied": { "$className": "RemoteEvent" },
+        "PlayerRespawn": { "$className": "RemoteEvent" },
+        "DeodorantSpray": { "$className": "RemoteEvent" },
+        "NGMIStunned": { "$className": "RemoteEvent" },
+        "HidingStateChanged": { "$className": "RemoteEvent" },
+        "SabotageEvent": { "$className": "RemoteEvent" },
+        "PanelRepaired": { "$className": "RemoteEvent" },
+        "OpenPanelPuzzle": { "$className": "RemoteEvent" },
+        "CutsceneTrigger": { "$className": "RemoteEvent" },
+        "EndingTrigger": { "$className": "RemoteEvent" },
+        "FlashlightToggle": { "$className": "RemoteEvent" },
+        "FlashlightRecharge": { "$className": "RemoteEvent" },
+        "CorruptionStarted": { "$className": "RemoteEvent" },
+        "EnergyRefilled": { "$className": "RemoteEvent" },
+        "AdminCommand": { "$className": "RemoteEvent" }
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "ServerStorage": {
+      "$className": "ServerStorage"
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$properties": {
+        "CameraMaxZoomDistance": 20,
+        "CameraMinZoomDistance": 5,
+        "CharacterWalkSpeed": 11
+      },
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+
+    "StarterGui": {
+      "$className": "StarterGui",
+      "$properties": {
+        "ScreenOrientation": "Sensor"
+      },
+      "GameUI": {
+        "$path": "src/gui"
+      }
+    },
+
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [170, 170, 170],
+        "Brightness": 2,
+        "ClockTime": 18,
+        "FogEnd": 1000,
+        "FogStart": 500,
+        "OutdoorAmbient": [170, 170, 170],
+        "GlobalShadows": true,
+        "Technology": "ShadowMap"
+      }
+    },
+
+    "SoundService": {
+      "$className": "SoundService",
+      "$properties": {
+        "AmbientReverb": "GenericReverb"
+      }
+    },
+
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "Gravity": 196.2,
+        "StreamingEnabled": false
+      }
+    }
+  }
+}
