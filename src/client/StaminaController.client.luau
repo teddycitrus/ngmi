@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- StaminaController.client.luau
--- Sprint + energy system for Code Red: The Hackathon Horror.
+-- Sprint + energy system for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Draw an energy bar in the bottom-left corner of the screen

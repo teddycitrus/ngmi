@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- InteractionManager.server.luau
--- Unified interaction routing for Code Red: The Hackathon Horror.
+-- Unified interaction routing for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Set up ProximityPrompts on all tagged interactable objects

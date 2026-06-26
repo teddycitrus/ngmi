@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- InventoryUI.client.luau
--- Client-side inventory hotbar for Code Red: The Hackathon Horror.
+-- Client-side inventory hotbar for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Display 4-slot hotbar at bottom-center of screen

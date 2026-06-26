@@ -458,7 +458,7 @@ local function playTrueEnding()
     credits.Position = UDim2.new(0.2, 0, 1.1, 0)
     credits.BackgroundTransparency = 1
     credits.Text = table.concat({
-        "CODE RED: THE HACKATHON HORROR",
+        "NOT GONNA MAKE IT",
         "",
         "A game about shipping code under pressure",
         "",

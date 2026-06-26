@@ -2,7 +2,7 @@
 --[[
 	ItemDefinitions.luau
 	====================
-	Central registry of every pick-up-able item in Code Red.
+	Central registry of every pick-up-able item in Not Gonna Make It.
 
 	Each item has a canonical definition here — the server uses this to
 	validate drops/pickups, and the client reads it for UI display.

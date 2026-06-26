@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- MapBuilder.server.luau
--- Procedural 3-floor hackathon venue for "Code Red: The Hackathon Horror".
+-- Procedural 3-floor hackathon venue for "Not Gonna Make It".
 --
 -- Design rules that keep the geometry clean (no overlapping / z-fighting faces):
 --   • ONE floor slab per level. Rooms never carry their own floor part, so two
@@ -126,7 +126,7 @@ local PAPER_CORK = Color3.fromRGB(150, 110, 66)
 local INK = Color3.fromRGB(35, 35, 42)
 
 local POSTER_POOL: { Poster } = {
-	{ title = "CODERED HACKATHON", body = "48 HOURS\n∞ POSSIBILITIES\n1 WINNER", accent = Color3.fromRGB(200, 40, 40), paper = PAPER_WHITE, fg = INK },
+	{ title = "NGMI HACKATHON", body = "48 HOURS\n∞ POSSIBILITIES\n1 WINNER", accent = Color3.fromRGB(200, 40, 40), paper = PAPER_WHITE, fg = INK },
 	{ title = "STAY HYDRATED", body = "Water > Energy Drinks.\n(We know. We're sorry.)", accent = Color3.fromRGB(40, 130, 210), paper = PAPER_WHITE, fg = INK },
 	{ title = "FREE WIFI", body = "SSID: VesperHacks_5G\npass: hunter2", accent = Color3.fromRGB(40, 160, 90), paper = PAPER_WHITE, fg = INK },
 	{ title = "DEMO DAY", body = "Sunday · 4 PM\nMain Stage\nWorking demos only!", accent = Color3.fromRGB(150, 60, 200), paper = PAPER_WHITE, fg = INK },

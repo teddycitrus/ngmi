@@ -2,7 +2,7 @@
 --[[
 	GameConfig.luau
 	===============
-	Shared constants for "Code Red: The Hackathon Horror"
+	Shared constants for "Not Gonna Make It"
 
 	Every tunable number in the game lives here. Server and client both
 	require this module so balance changes only need to happen in one place.

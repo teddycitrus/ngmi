@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- NPCDialogue.client.luau
--- Client-side NPC dialogue UI for Code Red: The Hackathon Horror.
+-- Client-side NPC dialogue UI for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Listen for NPCDialogueTrigger from server

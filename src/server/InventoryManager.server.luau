@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- InventoryManager.server.luau
--- Server-authoritative inventory system for Code Red: The Hackathon Horror.
+-- Server-authoritative inventory system for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Maintain per-player inventory (4 slots)

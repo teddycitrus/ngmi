@@ -1,7 +1,7 @@
 --!strict
 --[[
 	ItemConfig.luau
-	Shared configuration for all items in Code Red: The Hackathon Horror.
+	Shared configuration for all items in Not Gonna Make It.
 	Defines item types, stack limits, ammo capacities, visual representation,
 	and usage effect parameters.
 ]]

@@ -2,7 +2,7 @@
 --[[
 	LightingProfiles.luau
 	=====================
-	Lighting & post-processing presets for every phase of Code Red.
+	Lighting & post-processing presets for every phase of Not Gonna Make It.
 
 	Each profile maps 1:1 with a visual "mood" the game can tween to.
 	The LightingController (client) reads a profile and interpolates

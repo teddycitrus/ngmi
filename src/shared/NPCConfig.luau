@@ -1,7 +1,7 @@
 --!strict
 --[[
 	NPCConfig.luau
-	Shared configuration for all NPCs in Code Red: The Hackathon Horror.
+	Shared configuration for all NPCs in Not Gonna Make It.
 	Defines NPC types, spawn positions, patrol waypoints, dialogue trees,
 	and corruption/mutation behavior parameters.
 ]]

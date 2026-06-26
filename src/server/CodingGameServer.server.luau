@@ -2,7 +2,7 @@
 --[[
 	CodingGameServer.server.luau
 	============================
-	Server-side coding progress tracker for "Code Red: The Hackathon Horror".
+	Server-side coding progress tracker for "Not Gonna Make It".
 
 	Responsibilities:
 	  • Tracks per-player project completion (0-100%)

@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- GameStateClient.client.luau
--- Client-side state listener for "Code Red: The Hackathon Horror"
+-- Client-side state listener for "Not Gonna Make It"
 --
 -- Listens to server remotes (GameStateChanged, PhaseTimerSync, EndingTrigger,
 -- CorruptionStarted), maintains a local copy of the current phase and time,

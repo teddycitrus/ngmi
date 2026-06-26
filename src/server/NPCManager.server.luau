@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- NPCManager.server.luau
--- Server-side NPC lifecycle manager for Code Red: The Hackathon Horror.
+-- Server-side NPC lifecycle manager for Not Gonna Make It.
 --
 -- Responsibilities:
 --   • Spawn NPC humanoid models at DAY1 start from NPCConfig data

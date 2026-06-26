@@ -2,7 +2,7 @@
 --[[
 	SurvivalManager.server.luau
 	===========================
-	Server-side Night 2 survival orchestrator for "Code Red: The Hackathon Horror".
+	Server-side Night 2 survival orchestrator for "Not Gonna Make It".
 
 	Responsibilities:
 	  1. Health System     – track per-player HP, handle damage/death/respawn

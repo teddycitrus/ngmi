@@ -1,7 +1,7 @@
 --!strict
 --[[
 	LobbyUI.client.luau
-	LocalScript — Full-screen lobby interface for Code Red
+	LocalScript — Full-screen lobby interface for Not Gonna Make It
 	
 	Creates a premium, horror-themed lobby menu entirely via code:
 	  • Glitchy red title with pulsing animation

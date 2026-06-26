@@ -1,7 +1,7 @@
 --!strict
 --------------------------------------------------------------------------------
 -- GameStateManager.server.luau
--- Central server-side game controller for "Code Red: The Hackathon Horror"
+-- Central server-side game controller for "Not Gonna Make It"
 --
 -- Implements the core state machine: LOBBY → DAY1 → DAY2 → NIGHT2 → DAY3
 -- Manages per-match state, per-player data, phase transitions, timers,

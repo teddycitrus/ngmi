@@ -3,7 +3,7 @@
 -- ServerRole.luau
 -- Tells the rest of the server which kind of server instance this is.
 --
--- A published Code Red experience runs two kinds of server:
+-- A published Not Gonna Make It experience runs two kinds of server:
 --   • LOBBY server  — a normal public server where players pick a party size
 --                     and queue. No match runs here.
 --   • MATCH server  — a brand-new *reserved* server created on demand (via
