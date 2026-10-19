@@ -10,6 +10,7 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ItemDefinitions = require(ReplicatedStorage.Shared.ItemDefinitions)
+local UITheme = require(ReplicatedStorage.Shared.UITheme)
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local QuestUpdate = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
@@ -65,9 +66,9 @@ local header = Instance.new("TextButton")
 header.Name = "Header"
 header.Size = UDim2.new(1, 0, 0, 32)
 header.BackgroundTransparency = 1
-header.Text = "📋 QUESTS"
+header.Text = "QUESTS"
 header.TextSize = 14
-header.Font = Enum.Font.GothamBold
+header.FontFace = UITheme.Font.Bold
 header.TextColor3 = Color3.fromRGB(200, 200, 220)
 header.TextXAlignment = Enum.TextXAlignment.Left
 header.Parent = container
@@ -83,7 +84,7 @@ minimizeIcon.Position = UDim2.new(1, -30, 0, 6)
 minimizeIcon.BackgroundTransparency = 1
 minimizeIcon.Text = "▼"
 minimizeIcon.TextSize = 12
-minimizeIcon.Font = Enum.Font.GothamBold
+minimizeIcon.FontFace = UITheme.Font.Bold
 minimizeIcon.TextColor3 = Color3.fromRGB(150, 150, 170)
 minimizeIcon.Parent = header
 
@@ -133,7 +134,7 @@ local function createQuestEntry(questId: string, questData: typeof(activeQuests[
     nameLabel.BackgroundTransparency = 1
     nameLabel.Text = questData.name
     nameLabel.TextSize = 13
-    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.FontFace = UITheme.Font.Bold
     nameLabel.TextColor3 = Color3.fromRGB(255, 220, 100)
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
     nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
@@ -147,7 +148,7 @@ local function createQuestEntry(questId: string, questData: typeof(activeQuests[
     progressLabel.BackgroundTransparency = 1
     progressLabel.Text = string.format("%d/%d", questData.progress, questData.target)
     progressLabel.TextSize = 12
-    progressLabel.Font = Enum.Font.Code
+    progressLabel.FontFace = UITheme.Font.Mono
     progressLabel.TextColor3 = Color3.fromRGB(150, 200, 150)
     progressLabel.TextXAlignment = Enum.TextXAlignment.Left
     progressLabel.Parent = entry
@@ -155,7 +156,7 @@ local function createQuestEntry(questId: string, questData: typeof(activeQuests[
     -- Completed indicator
     if questData.completed then
         nameLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-        progressLabel.Text = "✓ COMPLETE"
+        progressLabel.Text = "COMPLETE"
         progressLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
     end
 
@@ -206,32 +207,33 @@ local function showCompletionNotification(questId: string, rewards: { { itemId: 
     notifGui.Parent = playerGui
 
     local notif = Instance.new("Frame")
-    notif.Size = UDim2.new(0, 350, 0, 80)
+    notif.Size = UDim2.new(0, 300, 0, 54)
     notif.Position = UDim2.new(1, 0, 0.15, 0) -- Start off-screen right
-    notif.BackgroundColor3 = Color3.fromRGB(30, 35, 20)
+    notif.BackgroundColor3 = UITheme.Color.Surface
+    notif.BackgroundTransparency = UITheme.Alpha.Surface
     notif.BorderSizePixel = 0
     notif.Parent = notifGui
+    UITheme.corner(notif, 6)
+    UITheme.outline(notif)
 
-    local notifCorner = Instance.new("UICorner")
-    notifCorner.CornerRadius = UDim.new(0, 10)
-    notifCorner.Parent = notif
-
-    local notifStroke = Instance.new("UIStroke")
-    notifStroke.Color = Color3.fromRGB(200, 180, 50)
-    notifStroke.Thickness = 2
-    notifStroke.Parent = notif
+    -- Thin accent down the left edge
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(0, 2, 1, -16)
+    accent.Position = UDim2.new(0, 8, 0, 8)
+    accent.BackgroundColor3 = UITheme.Color.Good
+    accent.BorderSizePixel = 0
+    accent.Parent = notif
 
     -- Quest complete text
-    local completeText = Instance.new("TextLabel")
-    completeText.Size = UDim2.new(1, -16, 0, 30)
-    completeText.Position = UDim2.new(0, 8, 0, 8)
-    completeText.BackgroundTransparency = 1
-    completeText.Text = "🏆 QUEST COMPLETE!"
-    completeText.TextSize = 18
-    completeText.Font = Enum.Font.GothamBold
-    completeText.TextColor3 = Color3.fromRGB(255, 220, 50)
-    completeText.TextXAlignment = Enum.TextXAlignment.Left
-    completeText.Parent = notif
+    local completeText = UITheme.label(notif, {
+        text = "QUEST COMPLETE",
+        size = 11,
+        font = UITheme.Font.Bold,
+        color = UITheme.Color.Good,
+        shadow = false,
+    })
+    completeText.Size = UDim2.new(1, -36, 0, 14)
+    completeText.Position = UDim2.new(0, 20, 0, 9)
 
     -- Rewards text
     local rewardParts = {}
@@ -241,20 +243,19 @@ local function showCompletionNotification(questId: string, rewards: { { itemId: 
         table.insert(rewardParts, name .. " x" .. reward.count)
     end
 
-    local rewardText = Instance.new("TextLabel")
-    rewardText.Size = UDim2.new(1, -16, 0, 20)
-    rewardText.Position = UDim2.new(0, 8, 0, 40)
-    rewardText.BackgroundTransparency = 1
-    rewardText.Text = "Rewards: " .. table.concat(rewardParts, ", ")
-    rewardText.TextSize = 13
-    rewardText.Font = Enum.Font.Gotham
-    rewardText.TextColor3 = Color3.fromRGB(180, 220, 180)
-    rewardText.TextXAlignment = Enum.TextXAlignment.Left
-    rewardText.Parent = notif
+    local rewardText = UITheme.label(notif, {
+        text = table.concat(rewardParts, ", "),
+        size = 14,
+        font = UITheme.Font.Regular,
+        shadow = false,
+    })
+    rewardText.Size = UDim2.new(1, -36, 0, 18)
+    rewardText.Position = UDim2.new(0, 20, 0, 26)
+    rewardText.TextTruncate = Enum.TextTruncate.AtEnd
 
     -- Slide in
-    TweenService:Create(notif, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-        Position = UDim2.new(1, -360, 0.15, 0),
+    TweenService:Create(notif, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+        Position = UDim2.new(1, -(300 + UITheme.Margin), 0.15, 0),
     }):Play()
 
     -- Slide out after 4s
@@ -281,6 +282,8 @@ QuestUpdate.OnClientEvent:Connect(function(data: { id: string, name: string, des
             target = data.target,
             completed = data.completed,
         }
+    elseif typeof(data.id) == "string" then
+        activeQuests[data.id] = nil -- reset for a new match
     end
     refreshQuestList()
 end)

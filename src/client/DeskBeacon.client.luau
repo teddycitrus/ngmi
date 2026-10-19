@@ -22,6 +22,7 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local UITheme = require(ReplicatedStorage.Shared.UITheme)
 local DESK_TAG = GameConfig.TAGS.PLAYER_DESK
 
 local player = Players.LocalPlayer
@@ -92,9 +93,9 @@ local function buildBeacon(deskPart: BasePart)
 	title.Name = "Title"
 	title.Size = UDim2.new(1, 0, 0, 26)
 	title.BackgroundTransparency = 1
-	title.Text = "📍 YOUR DESK"
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 16
+	title.Text = "YOUR DESK"
+	title.FontFace = UITheme.Font.Bold
+	title.TextSize = 13
 	title.TextColor3 = BEACON_COLOR
 	title.TextStrokeTransparency = 0.3
 	title.TextStrokeColor3 = Color3.new(0, 0, 0)
@@ -106,9 +107,9 @@ local function buildBeacon(deskPart: BasePart)
 	distLabel.Position = UDim2.new(0, 0, 0, 26)
 	distLabel.BackgroundTransparency = 1
 	distLabel.Text = ""
-	distLabel.Font = Enum.Font.GothamMedium
-	distLabel.TextSize = 13
-	distLabel.TextColor3 = Color3.new(1, 1, 1)
+	distLabel.FontFace = UITheme.Font.Mono
+	distLabel.TextSize = 12
+	distLabel.TextColor3 = UITheme.Color.Text
 	distLabel.TextStrokeTransparency = 0.4
 	distLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
 	distLabel.Parent = billboard

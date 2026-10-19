@@ -17,6 +17,7 @@ local TweenService      = game:GetService("TweenService")
 local Lighting          = game:GetService("Lighting")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local UITheme = require(ReplicatedStorage.Shared.UITheme)
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -124,10 +125,10 @@ local function ensureTransitionGui(): (ScreenGui, Frame)
 	-- Optional "sleeping…" label
 	local label = Instance.new("TextLabel")
 	label.Name = "SleepText"
-	label.Size = UDim2.fromScale(1, 0.1)
-	label.Position = UDim2.fromScale(0, 0.45)
+	label.Size = UDim2.fromScale(0.7, 0.045)
+	label.Position = UDim2.fromScale(0.15, 0.475)
 	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.GothamBold
+	label.FontFace = UITheme.Font.Medium
 	label.TextScaled = true
 	label.TextColor3 = Color3.new(1, 1, 1)
 	label.TextTransparency = 1
@@ -283,9 +284,9 @@ EndingTrigger.OnClientEvent:Connect(function(data: { [string]: any })
 
 		local endingText = "The End"
 		if endingType == "true" then
-			endingText = "🏆 Project shipped! You survived the hackathon!"
+			endingText = "Project shipped. You survived the hackathon."
 		elseif endingType == "bad" then
-			endingText = "💀 Your project was incomplete... NGMI."
+			endingText = "Your project was incomplete. NGMI."
 		end
 
 		showOverlayText(endingText, 1)

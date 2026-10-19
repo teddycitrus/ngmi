@@ -11,6 +11,7 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local HidingStateChanged = Remotes:WaitForChild("HidingStateChanged") :: RemoteEvent
@@ -154,7 +155,7 @@ local function createMinigameUI()
     heartLabel.BackgroundTransparency = 1
     heartLabel.Text = "❤️"
     heartLabel.TextSize = 72
-    heartLabel.Font = Enum.Font.GothamBold
+    heartLabel.FontFace = UITheme.Font.Bold
     heartLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
     heartLabel.Parent = center
 
@@ -166,7 +167,7 @@ local function createMinigameUI()
     instruction.BackgroundTransparency = 1
     instruction.Text = "Press SPACE in rhythm with the heartbeat"
     instruction.TextSize = 16
-    instruction.Font = Enum.Font.Gotham
+    instruction.FontFace = UITheme.Font.Regular
     instruction.TextColor3 = Color3.fromRGB(200, 200, 200)
     instruction.Parent = minigameGui
 
@@ -196,7 +197,7 @@ local function createMinigameUI()
     missIndicator.BackgroundTransparency = 1
     missIndicator.Text = ""
     missIndicator.TextSize = 24
-    missIndicator.Font = Enum.Font.GothamBold
+    missIndicator.FontFace = UITheme.Font.Bold
     missIndicator.TextColor3 = Color3.fromRGB(255, 200, 50)
     missIndicator.Parent = minigameGui
 
@@ -208,7 +209,7 @@ local function createMinigameUI()
     safeLabel.BackgroundTransparency = 1
     safeLabel.Text = ""
     safeLabel.TextSize = 36
-    safeLabel.Font = Enum.Font.GothamBold
+    safeLabel.FontFace = UITheme.Font.Bold
     safeLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
     safeLabel.TextTransparency = 1
     safeLabel.Parent = minigameGui
@@ -352,7 +353,7 @@ function playerDiscovered()
         alertText.BackgroundTransparency = 1
         alertText.Text = "⚠️ DISCOVERED! ⚠️"
         alertText.TextSize = 42
-        alertText.Font = Enum.Font.GothamBold
+        alertText.FontFace = UITheme.Font.Bold
         alertText.TextColor3 = Color3.fromRGB(255, 50, 50)
         alertText.Parent = minigameGui
     end

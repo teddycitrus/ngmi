@@ -19,12 +19,14 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
 local ItemConfig = require(ReplicatedStorage.Shared.ItemConfig)
+local UITheme = require(ReplicatedStorage.Shared.UITheme)
 
 -- Remotes
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local InventoryUpdated = Remotes:WaitForChild("InventoryUpdated") :: RemoteEvent
 local UseItem = Remotes:WaitForChild("UseItem") :: RemoteEvent
 local DropItem = Remotes:WaitForChild("DropItem") :: RemoteEvent
+local EquipItem = Remotes:WaitForChild("EquipItem") :: RemoteEvent
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
@@ -34,23 +36,29 @@ local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 --------------------------------------------------------------------------------
 
 local SLOT_COUNT = 4
-local SLOT_SIZE = 60
-local SLOT_PADDING = 8
-local SLOT_CORNER_RADIUS = 8
-local HOTBAR_BOTTOM_OFFSET = 30
+local SLOT_SIZE = 52
+local SLOT_PADDING = 6
+local SLOT_CORNER_RADIUS = 6
+local HOTBAR_BOTTOM_OFFSET = UITheme.Margin
 
 -- Colors
-local SLOT_BG_COLOR = Color3.fromRGB(30, 30, 40)
-local SLOT_BG_SELECTED = Color3.fromRGB(45, 30, 30)
-local SLOT_BORDER_COLOR = Color3.fromRGB(60, 60, 70)
-local SLOT_BORDER_SELECTED = Color3.fromRGB(220, 50, 50) -- bright red glow
-local SLOT_NUMBER_COLOR = Color3.fromRGB(150, 150, 160)
-local STACK_COUNT_COLOR = Color3.new(1, 1, 1)
-local AMMO_BAR_BG_COLOR = Color3.fromRGB(20, 20, 20)
-local AMMO_BAR_FILL_COLOR = Color3.fromRGB(80, 200, 80)
-local AMMO_BAR_LOW_COLOR = Color3.fromRGB(220, 60, 60)
-local USE_BUTTON_COLOR = Color3.fromRGB(200, 50, 50)
-local USE_BUTTON_TEXT_COLOR = Color3.new(1, 1, 1)
+local SLOT_BG_COLOR = UITheme.Color.Surface
+local SLOT_BG_TRANSPARENCY = UITheme.Alpha.Surface
+local SLOT_BG_SELECTED_TRANSPARENCY = 0.25
+local SLOT_BORDER_COLOR = UITheme.Color.Line
+local SLOT_BORDER_TRANSPARENCY = UITheme.Alpha.Line
+local SLOT_BORDER_SELECTED_TRANSPARENCY = 0.25
+local SLOT_NUMBER_COLOR = UITheme.Color.Faint
+local STACK_COUNT_COLOR = UITheme.Color.Text
+local AMMO_BAR_BG_COLOR = UITheme.Color.Line
+local AMMO_BAR_FILL_COLOR = UITheme.Color.Text
+local AMMO_BAR_MID_COLOR = UITheme.Color.Warn
+local AMMO_BAR_LOW_COLOR = UITheme.Color.Danger
+local USE_BUTTON_COLOR = UITheme.Color.Surface
+local USE_BUTTON_TEXT_COLOR = UITheme.Color.Text
+
+-- Item name that fades in above the hotbar when the selection changes.
+local NAME_HOLD_TIME = 1.6
 
 -- Animation
 local TWEEN_QUICK = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -91,6 +99,20 @@ local slotUIs: { SlotUI } = {}
 local screenGui: ScreenGui
 local hotbarFrame: Frame
 local useButton: TextButton? = nil
+local itemNameLabel: TextLabel? = nil
+local itemNameToken = 0
+
+--------------------------------------------------------------------------------
+-- Held plunger (server-side).
+-- The plunger model and its sword swing are created server-side (see
+-- InventoryManager) so EVERY player sees them. The client's only job is to tell
+-- the server which item is currently selected so it can equip / stow the model.
+--------------------------------------------------------------------------------
+
+local function notifyEquip()
+	local slot = currentInventory[selectedSlot]
+	EquipItem:FireServer({ itemId = slot and slot.itemId or nil })
+end
 
 --------------------------------------------------------------------------------
 -- GUI Construction
@@ -129,6 +151,18 @@ local function createHotbarGui()
 		table.insert(slotUIs, slotUI)
 	end
 
+	local nameLabel = UITheme.label(screenGui, {
+		size = 13,
+		font = UITheme.Font.Medium,
+		transparency = 1,
+		alignX = Enum.TextXAlignment.Center,
+	})
+	nameLabel.Name = "ItemName"
+	nameLabel.AnchorPoint = Vector2.new(0.5, 1)
+	nameLabel.Size = UDim2.fromOffset(240, 18)
+	nameLabel.Position = UDim2.new(0.5, 0, 1, -(HOTBAR_BOTTOM_OFFSET + SLOT_SIZE + 10))
+	itemNameLabel = nameLabel
+
 	-- Mobile USE button (only on touch devices)
 	if IS_MOBILE then
 		createUseButton()
@@ -140,7 +174,8 @@ function createSlot(index: number): SlotUI
 	frame.Name = "Slot_" .. tostring(index)
 	frame.Size = UDim2.new(0, SLOT_SIZE, 0, SLOT_SIZE)
 	frame.BackgroundColor3 = SLOT_BG_COLOR
-	frame.BackgroundTransparency = 0.15
+	frame.BackgroundTransparency = SLOT_BG_TRANSPARENCY
+	frame.BorderSizePixel = 0
 	frame.LayoutOrder = index
 	frame.Parent = hotbarFrame
 
@@ -151,21 +186,22 @@ function createSlot(index: number): SlotUI
 
 	-- Border stroke (changes color when selected)
 	local stroke = Instance.new("UIStroke")
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	stroke.Color = SLOT_BORDER_COLOR
-	stroke.Thickness = 2
-	stroke.Transparency = 0.3
+	stroke.Thickness = 1
+	stroke.Transparency = SLOT_BORDER_TRANSPARENCY
 	stroke.Parent = frame
 
 	-- Slot number label (top-left corner)
 	local numberLabel = Instance.new("TextLabel")
 	numberLabel.Name = "SlotNumber"
-	numberLabel.Size = UDim2.new(0, 16, 0, 16)
-	numberLabel.Position = UDim2.new(0, 3, 0, 2)
+	numberLabel.Size = UDim2.new(0, 16, 0, 14)
+	numberLabel.Position = UDim2.new(0, 5, 0, 3)
 	numberLabel.BackgroundTransparency = 1
 	numberLabel.Text = tostring(index)
 	numberLabel.TextColor3 = SLOT_NUMBER_COLOR
-	numberLabel.Font = Enum.Font.GothamBold
-	numberLabel.TextSize = 11
+	numberLabel.FontFace = UITheme.Font.Mono
+	numberLabel.TextSize = 10
 	numberLabel.TextXAlignment = Enum.TextXAlignment.Left
 	numberLabel.TextYAlignment = Enum.TextYAlignment.Top
 	numberLabel.Parent = frame
@@ -173,13 +209,13 @@ function createSlot(index: number): SlotUI
 	-- Item icon (emoji text in center)
 	local iconLabel = Instance.new("TextLabel")
 	iconLabel.Name = "ItemIcon"
-	iconLabel.Size = UDim2.new(1, -8, 1, -16)
-	iconLabel.Position = UDim2.new(0.5, 0, 0.45, 0)
+	iconLabel.Size = UDim2.new(1, -20, 1, -20)
+	iconLabel.Position = UDim2.new(0.5, 0, 0.5, 0)
 	iconLabel.AnchorPoint = Vector2.new(0.5, 0.5)
 	iconLabel.BackgroundTransparency = 1
 	iconLabel.Text = ""
 	iconLabel.TextColor3 = Color3.new(1, 1, 1)
-	iconLabel.Font = Enum.Font.GothamBold
+	iconLabel.FontFace = UITheme.Font.Bold
 	iconLabel.TextScaled = true
 	iconLabel.Parent = frame
 
@@ -187,14 +223,13 @@ function createSlot(index: number): SlotUI
 	local stackLabel = Instance.new("TextLabel")
 	stackLabel.Name = "StackCount"
 	stackLabel.Size = UDim2.new(0, 20, 0, 16)
-	stackLabel.Position = UDim2.new(1, -3, 1, -3)
+	stackLabel.Position = UDim2.new(1, -5, 1, -3)
 	stackLabel.AnchorPoint = Vector2.new(1, 1)
 	stackLabel.BackgroundTransparency = 1
 	stackLabel.Text = ""
 	stackLabel.TextColor3 = STACK_COUNT_COLOR
-	stackLabel.TextStrokeTransparency = 0.3
-	stackLabel.Font = Enum.Font.GothamBold
-	stackLabel.TextSize = 13
+	stackLabel.FontFace = UITheme.Font.MonoMedium
+	stackLabel.TextSize = 11
 	stackLabel.TextXAlignment = Enum.TextXAlignment.Right
 	stackLabel.TextYAlignment = Enum.TextYAlignment.Bottom
 	stackLabel.Visible = false
@@ -203,27 +238,21 @@ function createSlot(index: number): SlotUI
 	-- Ammo bar (thin bar at bottom of slot)
 	local ammoBarBg = Instance.new("Frame")
 	ammoBarBg.Name = "AmmoBarBg"
-	ammoBarBg.Size = UDim2.new(0.85, 0, 0, 4)
-	ammoBarBg.Position = UDim2.new(0.5, 0, 1, -6)
+	ammoBarBg.Size = UDim2.new(1, -12, 0, 2)
+	ammoBarBg.Position = UDim2.new(0.5, 0, 1, -4)
 	ammoBarBg.AnchorPoint = Vector2.new(0.5, 1)
 	ammoBarBg.BackgroundColor3 = AMMO_BAR_BG_COLOR
-	ammoBarBg.BackgroundTransparency = 0.3
+	ammoBarBg.BackgroundTransparency = UITheme.Alpha.Track
+	ammoBarBg.BorderSizePixel = 0
 	ammoBarBg.Visible = false
 	ammoBarBg.Parent = frame
-
-	local ammoBarCorner = Instance.new("UICorner")
-	ammoBarCorner.CornerRadius = UDim.new(0, 2)
-	ammoBarCorner.Parent = ammoBarBg
 
 	local ammoBarFill = Instance.new("Frame")
 	ammoBarFill.Name = "AmmoFill"
 	ammoBarFill.Size = UDim2.new(1, 0, 1, 0)
 	ammoBarFill.BackgroundColor3 = AMMO_BAR_FILL_COLOR
+	ammoBarFill.BorderSizePixel = 0
 	ammoBarFill.Parent = ammoBarBg
-
-	local ammoFillCorner = Instance.new("UICorner")
-	ammoFillCorner.CornerRadius = UDim.new(0, 2)
-	ammoFillCorner.Parent = ammoBarFill
 
 	-- Click handler (mobile: tap to select, tap again to use)
 	local clickButton = Instance.new("TextButton")
@@ -264,23 +293,16 @@ function createUseButton()
 	btn.Position = UDim2.new(0.5, 0, 1, -(HOTBAR_BOTTOM_OFFSET + SLOT_SIZE + 12))
 	btn.AnchorPoint = Vector2.new(0.5, 1)
 	btn.BackgroundColor3 = USE_BUTTON_COLOR
-	btn.BackgroundTransparency = 0.1
+	btn.BackgroundTransparency = UITheme.Alpha.Surface
+	btn.BorderSizePixel = 0
 	btn.Text = "USE"
 	btn.TextColor3 = USE_BUTTON_TEXT_COLOR
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 18
+	btn.FontFace = UITheme.Font.Bold
+	btn.TextSize = 14
 	btn.Visible = false -- hidden until usable item selected
 	btn.Parent = screenGui
-
-	local btnCorner = Instance.new("UICorner")
-	btnCorner.CornerRadius = UDim.new(0, 10)
-	btnCorner.Parent = btn
-
-	local btnStroke = Instance.new("UIStroke")
-	btnStroke.Color = Color3.fromRGB(255, 100, 100)
-	btnStroke.Thickness = 2
-	btnStroke.Transparency = 0.3
-	btnStroke.Parent = btn
+	UITheme.corner(btn, 6)
+	UITheme.outline(btn, 0.6)
 
 	btn.Activated:Connect(function()
 		useSelectedItem()
@@ -295,7 +317,7 @@ end
 --------------------------------------------------------------------------------
 
 local METER_SEGMENTS = 20
-local METER_RADIUS = SLOT_SIZE / 2 + 6
+local METER_RADIUS = SLOT_SIZE / 2 + 7
 
 local ammoMeterContainer: Frame? = nil
 local ammoMeterSegments: { Frame } = {}
@@ -318,16 +340,13 @@ local function createAmmoMeter()
 
 		local seg = Instance.new("Frame")
 		seg.Name = "Seg_" .. tostring(i)
-		seg.Size = UDim2.new(0, 4, 0, 8)
+		seg.Size = UDim2.new(0, 2, 0, 5)
 		seg.Position = UDim2.new(0.5, x, 0.5, y)
 		seg.AnchorPoint = Vector2.new(0.5, 0.5)
 		seg.Rotation = math.deg(angle) + 90
 		seg.BackgroundColor3 = AMMO_BAR_FILL_COLOR
+		seg.BorderSizePixel = 0
 		seg.Parent = container
-
-		local segCorner = Instance.new("UICorner")
-		segCorner.CornerRadius = UDim.new(0, 2)
-		segCorner.Parent = seg
 
 		table.insert(ammoMeterSegments, seg)
 	end
@@ -347,12 +366,12 @@ local function updateAmmoMeter(ammoPercent: number)
 			if ammoPercent > 0.5 then
 				seg.BackgroundColor3 = AMMO_BAR_FILL_COLOR
 			elseif ammoPercent > 0.2 then
-				seg.BackgroundColor3 = Color3.fromRGB(220, 180, 40)
+				seg.BackgroundColor3 = AMMO_BAR_MID_COLOR
 			else
 				seg.BackgroundColor3 = AMMO_BAR_LOW_COLOR
 			end
 		else
-			seg.BackgroundTransparency = 0.7
+			seg.BackgroundTransparency = UITheme.Alpha.Track
 			seg.BackgroundColor3 = AMMO_BAR_BG_COLOR
 		end
 	end
@@ -373,6 +392,34 @@ local function positionAmmoMeter(slotIndex: number)
 end
 
 --------------------------------------------------------------------------------
+-- Selected item name
+--------------------------------------------------------------------------------
+
+--- Fade the selected item's name in above the hotbar, then out again. A token
+--- guards the fade-out so fast slot switching can't hide the newest name early.
+function showItemName()
+	local nameLabel = itemNameLabel
+	if not nameLabel then
+		return
+	end
+	local slot = currentInventory[selectedSlot]
+	local def = if slot then ItemConfig.items[slot.itemId] else nil
+	itemNameToken += 1
+	local token = itemNameToken
+	if not def then
+		TweenService:Create(nameLabel, TWEEN_QUICK, { TextTransparency = 1 }):Play()
+		return
+	end
+	nameLabel.Text = def.displayName
+	TweenService:Create(nameLabel, TWEEN_QUICK, { TextTransparency = 0 }):Play()
+	task.delay(NAME_HOLD_TIME, function()
+		if token == itemNameToken then
+			TweenService:Create(nameLabel, TweenInfo.new(0.6), { TextTransparency = 1 }):Play()
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
 -- Slot Selection
 --------------------------------------------------------------------------------
 
@@ -386,31 +433,38 @@ function selectSlot(index: number)
 	if prevSlot >= 1 and prevSlot <= #slotUIs then
 		local prevUI = slotUIs[prevSlot]
 		TweenService:Create(prevUI.stroke, TWEEN_QUICK, {
-			Color = SLOT_BORDER_COLOR,
-			Thickness = 2,
+			Transparency = SLOT_BORDER_TRANSPARENCY,
 		}):Play()
 		TweenService:Create(prevUI.frame, TWEEN_QUICK, {
-			BackgroundColor3 = SLOT_BG_COLOR,
+			BackgroundTransparency = SLOT_BG_TRANSPARENCY,
 			Size = UDim2.new(0, SLOT_SIZE, 0, SLOT_SIZE),
 		}):Play()
+		TweenService:Create(prevUI.numberLabel, TWEEN_QUICK, { TextColor3 = SLOT_NUMBER_COLOR }):Play()
 	end
 
 	-- Select new
 	local newUI = slotUIs[index]
 	TweenService:Create(newUI.stroke, TWEEN_QUICK, {
-		Color = SLOT_BORDER_SELECTED,
-		Thickness = 3,
+		Transparency = SLOT_BORDER_SELECTED_TRANSPARENCY,
 	}):Play()
-	TweenService:Create(newUI.frame, TWEEN_BOUNCE, {
-		BackgroundColor3 = SLOT_BG_SELECTED,
-		Size = UDim2.new(0, SLOT_SIZE + 4, 0, SLOT_SIZE + 4),
+	TweenService:Create(newUI.frame, TWEEN_QUICK, {
+		BackgroundTransparency = SLOT_BG_SELECTED_TRANSPARENCY,
+		Size = UDim2.new(0, SLOT_SIZE + 2, 0, SLOT_SIZE + 2),
 	}):Play()
+	TweenService:Create(newUI.numberLabel, TWEEN_QUICK, { TextColor3 = UITheme.Color.Text }):Play()
+
+	if prevSlot ~= index then
+		showItemName()
+	end
 
 	-- Update ammo meter visibility
 	updateAmmoMeterForSlot(index)
 
 	-- Update USE button visibility (mobile)
 	updateUseButtonVisibility()
+
+	-- Tell the server which item is now selected (drives the held plunger).
+	notifyEquip()
 end
 
 function updateAmmoMeterForSlot(slotIndex: number)
@@ -515,10 +569,10 @@ local function updateSlotDisplay(index: number, slot: InventorySlot?)
 
 		-- Scale bounce on the frame
 		local originalSize = (index == selectedSlot)
-			and UDim2.new(0, SLOT_SIZE + 4, 0, SLOT_SIZE + 4)
+			and UDim2.new(0, SLOT_SIZE + 2, 0, SLOT_SIZE + 2)
 			or UDim2.new(0, SLOT_SIZE, 0, SLOT_SIZE)
 
-		ui.frame.Size = UDim2.new(0, SLOT_SIZE - 6, 0, SLOT_SIZE - 6)
+		ui.frame.Size = UDim2.new(0, SLOT_SIZE - 4, 0, SLOT_SIZE - 4)
 		TweenService:Create(ui.frame, TWEEN_BOUNCE, {
 			Size = originalSize,
 		}):Play()
@@ -586,9 +640,12 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 		return
 	end
 
-	-- E key to use selected item
+	-- E key to use selected item (the plunger is click/tap-only, so skip it here)
 	if input.KeyCode == Enum.KeyCode.E then
-		useSelectedItem()
+		local sel = currentInventory[selectedSlot]
+		if not (sel and sel.itemId == "plunger") then
+			useSelectedItem()
+		end
 		return
 	end
 
@@ -622,6 +679,8 @@ end)
 InventoryUpdated.OnClientEvent:Connect(function(inventory: any)
 	if typeof(inventory) ~= "table" then return end
 	refreshInventoryDisplay(inventory)
+	-- Pick up / drop / swap may have changed what's in the selected slot.
+	notifyEquip()
 end)
 
 --------------------------------------------------------------------------------

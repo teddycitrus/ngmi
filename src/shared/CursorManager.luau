@@ -1,29 +1,49 @@
 --!strict
 --[[
-    CursorManager.luau
+	CursorManager.luau
 
-    Centralised free/restore of the mouse cursor for GUI scenes.
+	Centralised free/restore of the mouse cursor for GUI scenes.
 
-    Gameplay runs in LockFirstPerson, which pins the mouse to screen-centre and
-    hides it — that makes any clickable GUI (wire puzzle, coding terminal, dialogue,
-    admin panel, …) impossible to use. Rather than every GUI script rolling its own
-    unlock/relock (and getting the relock subtly wrong), each scene calls:
+	Gameplay runs in LockFirstPerson, which pins the mouse to screen-centre and
+	hides it, so any clickable GUI (wire puzzle, coding terminal, dialogue, admin
+	panel, ...) is impossible to use. Rather than every GUI script rolling its own
+	unlock/relock (and getting the relock subtly wrong), each scene calls:
 
-        CursorManager.push()   -- when it opens   → frees + shows the cursor
-        CursorManager.pop()    -- when it closes  → restores the previous state
+		CursorManager.push()   -- when it opens:  frees + shows the cursor
+		CursorManager.pop()    -- when it closes: restores the previous state
 
-    It is reference-counted, so overlapping scenes behave, and it records the EXACT
-    prior cursor state on the first push and restores it on the last pop — so it
-    works whether we opened from gameplay (LockFirstPerson) or anywhere else,
-    without hard-coding which mode to return to.
+	It is reference-counted, so overlapping scenes behave, and it records the EXACT
+	prior cursor state on the FIRST push and restores it on the LAST pop, so it
+	works whether we opened from gameplay (LockFirstPerson) or anywhere else,
+	without hard-coding which mode to return to.
+
+	Robustness (this is what makes the wire puzzle etc. reliably clickable):
+	  * The free-cursor state is re-applied on EVERY push, not only the first. A
+	    single leaked/unbalanced push elsewhere used to make the next scene's push
+	    a no-op, leaving its GUI with a trapped, hidden cursor.
+	  * A per-frame guard re-asserts the free state for as long as ANY scene is
+	    open. Gameplay forces first person, and CameraController.lockFirstPerson()
+	    (fired on every phase change and at the end of every cutscene) slams the
+	    camera back to 0.5 zoom + LockFirstPerson, which re-pins the mouse. The
+	    guard makes "a scene is open" authoritative: the cursor stays free until
+	    the last pop, no matter what tries to re-lock it underneath.
 ]]
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 
 local CursorManager = {}
+
+-- Third-person zoom range used while a scene is open. Gameplay pins zoom at
+-- first-person (0.5); at that distance Roblox hard-locks the mouse to screen
+-- centre regardless of CameraMode/MouseBehavior, so we MUST widen the zoom to
+-- actually free the cursor. The GUI covers the screen, so the pulled-back view
+-- behind it is never seen.
+local FREE_MIN_ZOOM = 10
+local FREE_MAX_ZOOM = 16
 
 local openCount = 0
 local savedCameraMode: Enum.CameraMode? = nil
@@ -31,6 +51,27 @@ local savedMouseBehavior: Enum.MouseBehavior? = nil
 local savedMouseIcon: boolean? = nil
 local savedMinZoom: number? = nil
 local savedMaxZoom: number? = nil
+local guardConn: RBXScriptConnection? = nil
+
+--- Force the camera/mouse into the free-cursor state. Idempotent and cheap, so
+--- it is safe to call every frame from the guard below.
+local function applyFreeCursor()
+	if player.CameraMode ~= Enum.CameraMode.Classic then
+		player.CameraMode = Enum.CameraMode.Classic
+	end
+	if player.CameraMinZoomDistance < FREE_MIN_ZOOM then
+		player.CameraMinZoomDistance = FREE_MIN_ZOOM
+	end
+	if player.CameraMaxZoomDistance < FREE_MAX_ZOOM then
+		player.CameraMaxZoomDistance = FREE_MAX_ZOOM
+	end
+	if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	end
+	if not UserInputService.MouseIconEnabled then
+		UserInputService.MouseIconEnabled = true
+	end
+end
 
 --- True while at least one GUI scene currently owns a free cursor.
 function CursorManager.isOpen(): boolean
@@ -40,29 +81,30 @@ end
 --- Free and show the cursor. Call once when a GUI scene opens.
 function CursorManager.push()
 	openCount += 1
-	if openCount > 1 then
-		return -- already freed by an earlier scene
+
+	-- Snapshot the real pre-scene state, but only on the FIRST push so nested
+	-- scenes can't overwrite it with an already-freed state.
+	if openCount == 1 then
+		savedCameraMode = player.CameraMode
+		savedMouseBehavior = UserInputService.MouseBehavior
+		savedMouseIcon = UserInputService.MouseIconEnabled
+		savedMinZoom = player.CameraMinZoomDistance
+		savedMaxZoom = player.CameraMaxZoomDistance
 	end
 
-	-- Remember exactly how the cursor / camera were set up so we can put it back.
-	savedCameraMode = player.CameraMode
-	savedMouseBehavior = UserInputService.MouseBehavior
-	savedMouseIcon = UserInputService.MouseIconEnabled
-	savedMinZoom = player.CameraMinZoomDistance
-	savedMaxZoom = player.CameraMaxZoomDistance
+	-- Always (re)apply the free state, even for nested scenes, so a leaked count
+	-- or a first-person re-lock underneath can never leave a scene with a trapped
+	-- cursor.
+	applyFreeCursor()
 
-	-- IMPORTANT: gameplay pins the camera at first-person zoom (min == max == 0.5).
-	-- At that zoom Roblox hard-locks the mouse to screen centre no matter what
-	-- CameraMode/MouseBehavior we set — so just switching to Classic ISN'T enough,
-	-- the cursor stays trapped. We have to let the camera pull back out of first
-	-- person; widening the zoom range forces it to a third-person distance where the
-	-- mouse is genuinely free. (The GUI scene covers the screen, so the pulled-back
-	-- view behind it doesn't matter.)
-	player.CameraMode = Enum.CameraMode.Classic
-	player.CameraMinZoomDistance = 10
-	player.CameraMaxZoomDistance = 16
-	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-	UserInputService.MouseIconEnabled = true
+	-- Keep re-asserting it for as long as any scene is open.
+	if not guardConn then
+		guardConn = RunService.Heartbeat:Connect(function()
+			if openCount > 0 then
+				applyFreeCursor()
+			end
+		end)
+	end
 end
 
 --- Restore the cursor to its pre-push state. Call once when a GUI scene closes.
@@ -74,6 +116,13 @@ function CursorManager.pop()
 	openCount -= 1
 	if openCount > 0 then
 		return -- another scene still wants the cursor free
+	end
+
+	-- Last scene closed: stop the guard FIRST so it can't re-free the cursor a
+	-- frame after we restore the gameplay state below.
+	if guardConn then
+		guardConn:Disconnect()
+		guardConn = nil
 	end
 
 	-- Restore the zoom clamp first so the camera snaps back to first person, then

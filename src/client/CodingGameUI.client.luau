@@ -22,6 +22,7 @@ local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 -- while the coding terminal is open and restore it on close.
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CursorManager = require(Shared:WaitForChild("CursorManager"))
+local UITheme = require(Shared:WaitForChild("UITheme"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -154,6 +155,67 @@ end
 -- ============================================================
 -- TERMINAL HEADER
 -- ============================================================
+-- ============================================================
+-- TERMINAL ATMOSPHERE
+-- ============================================================
+-- Phosphor glow + CRT scanlines for the coding terminal. Both are purely
+-- decorative: Active = false and no GuiButtons, so neither can swallow a click
+-- from the puzzle underneath or interfere with the CursorManager scene.
+-- ============================================================
+
+--- Phosphor bleed. A stroke in the text's own colour at low opacity reads as an
+--- old monitor blooming, and unlike a duplicated blurred label it costs one
+--- instance and stays aligned automatically.
+local function addTerminalGlow(label: TextLabel | TextBox, intensity: number?)
+    local stroke = Instance.new("UIStroke")
+    stroke.Name = "PhosphorGlow"
+    stroke.Color = label.TextColor3
+    stroke.Thickness = 1.2
+    stroke.Transparency = 1 - (intensity or 0.35)
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+    stroke.Parent = label
+    -- Keep the bleed matched to the text if the colour changes (correct/wrong
+    -- feedback recolours several of these mid-puzzle).
+    label:GetPropertyChangedSignal("TextColor3"):Connect(function()
+        stroke.Color = label.TextColor3
+    end)
+end
+
+--- CRT scanlines confined to one frame. Pitch is in pixels so the line spacing
+--- stays constant regardless of how the panel scales.
+local function addScanlines(parent: Frame, pitch: number, alpha: number)
+    local holder = Instance.new("Frame")
+    holder.Name = "Scanlines"
+    holder.Size = UDim2.fromScale(1, 1)
+    holder.BackgroundTransparency = 1
+    holder.ClipsDescendants = true
+    holder.Active = false
+    holder.ZIndex = 50
+    holder.Parent = parent
+
+    local function redraw()
+        holder:ClearAllChildren()
+        local height = holder.AbsoluteSize.Y
+        if height <= 0 then
+            return
+        end
+        for y = 0, math.ceil(height), pitch do
+            local line = Instance.new("Frame")
+            line.Size = UDim2.new(1, 0, 0, 1)
+            line.Position = UDim2.new(0, 0, 0, y)
+            line.BackgroundColor3 = Color3.new(0, 0, 0)
+            line.BackgroundTransparency = alpha
+            line.BorderSizePixel = 0
+            line.Active = false
+            line.ZIndex = 50
+            line.Parent = holder
+        end
+    end
+
+    redraw()
+    holder:GetPropertyChangedSignal("AbsoluteSize"):Connect(redraw)
+end
+
 local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     if codingGui then codingGui:Destroy() end
 
@@ -172,6 +234,17 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     overlay.Parent = codingGui
 
     -- Terminal window
+    -- Faint dark vignette behind the terminal so the panel sits in the room
+    -- rather than floating flat on top of it.
+    local backdrop = Instance.new("UIGradient")
+    backdrop.Rotation = 90
+    backdrop.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.35),
+        NumberSequenceKeypoint.new(0.5, 0.6),
+        NumberSequenceKeypoint.new(1, 0.35),
+    })
+    backdrop.Parent = overlay
+
     local terminal = Instance.new("Frame")
     terminal.Name = "Terminal"
     terminal.Size = UDim2.new(0.7, 0, 0.75, 0)
@@ -206,10 +279,11 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     titleText.BackgroundTransparency = 1
     titleText.Text = "hackathon-project $ ./build.sh"
     titleText.TextSize = 14
-    titleText.Font = Enum.Font.Code
+    titleText.FontFace = UITheme.Font.Mono
     titleText.TextColor3 = Color3.fromRGB(0, 200, 0)
     titleText.TextXAlignment = Enum.TextXAlignment.Left
     titleText.Parent = titleBar
+    addTerminalGlow(titleText)
 
     -- Close button
     local closeBtn = Instance.new("TextButton")
@@ -218,7 +292,7 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
     closeBtn.Text = "✕"
     closeBtn.TextSize = 14
-    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.FontFace = UITheme.Font.Bold
     closeBtn.TextColor3 = Color3.new(1, 1, 1)
     closeBtn.Parent = titleBar
 
@@ -259,7 +333,7 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     progressLabel.BackgroundTransparency = 1
     progressLabel.Text = string.format("Project: %d%%", math.floor(projectCompletion))
     progressLabel.TextSize = 12
-    progressLabel.Font = Enum.Font.Code
+    progressLabel.FontFace = UITheme.Font.Mono
     progressLabel.TextColor3 = Color3.new(1, 1, 1)
     progressLabel.ZIndex = 3
     progressLabel.Parent = progressFrame
@@ -271,6 +345,10 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     content.Position = UDim2.new(0, 10, 0, 70)
     content.BackgroundTransparency = 1
     content.Parent = terminal
+
+    -- CRT pass over the finished panel. Added last so it layers above every
+    -- child, and only to the terminal window rather than the whole screen.
+    addScanlines(terminal, 3, 0.94)
 
     return codingGui, content, progressLabel
 end
@@ -310,12 +388,13 @@ local function startTypingChallenge()
     codeDisplay.BackgroundTransparency = 1
     codeDisplay.Text = table.concat(lines, "\n")
     codeDisplay.TextSize = 16
-    codeDisplay.Font = Enum.Font.Code
+    codeDisplay.FontFace = UITheme.Font.Mono
     codeDisplay.TextColor3 = Color3.fromRGB(0, 180, 0)
     codeDisplay.TextXAlignment = Enum.TextXAlignment.Left
     codeDisplay.TextYAlignment = Enum.TextYAlignment.Top
     codeDisplay.TextWrapped = true
     codeDisplay.Parent = content
+    addTerminalGlow(codeDisplay)
 
     -- Current line indicator
     local lineIndicator = Instance.new("TextLabel")
@@ -325,10 +404,11 @@ local function startTypingChallenge()
     lineIndicator.BackgroundTransparency = 1
     lineIndicator.Text = "Type line " .. currentLine .. "/" .. #lines .. ":"
     lineIndicator.TextSize = 14
-    lineIndicator.Font = Enum.Font.Code
+    lineIndicator.FontFace = UITheme.Font.Mono
     lineIndicator.TextColor3 = Color3.fromRGB(200, 200, 0)
     lineIndicator.TextXAlignment = Enum.TextXAlignment.Left
     lineIndicator.Parent = content
+    addTerminalGlow(lineIndicator)
 
     -- Target line
     local targetDisplay = Instance.new("TextLabel")
@@ -338,10 +418,11 @@ local function startTypingChallenge()
     targetDisplay.BackgroundColor3 = Color3.fromRGB(20, 30, 20)
     targetDisplay.Text = (lines[currentLine] or "")
     targetDisplay.TextSize = 16
-    targetDisplay.Font = Enum.Font.Code
+    targetDisplay.FontFace = UITheme.Font.Mono
     targetDisplay.TextColor3 = Color3.fromRGB(100, 255, 100)
     targetDisplay.TextXAlignment = Enum.TextXAlignment.Left
     targetDisplay.Parent = content
+    addTerminalGlow(targetDisplay)
 
     local targetCorner = Instance.new("UICorner")
     targetCorner.CornerRadius = UDim.new(0, 4)
@@ -357,11 +438,12 @@ local function startTypingChallenge()
     inputBox.PlaceholderText = "> Type here..."
     inputBox.PlaceholderColor3 = Color3.fromRGB(50, 80, 50)
     inputBox.TextSize = 16
-    inputBox.Font = Enum.Font.Code
+    inputBox.FontFace = UITheme.Font.Mono
     inputBox.TextColor3 = Color3.fromRGB(0, 255, 0)
     inputBox.TextXAlignment = Enum.TextXAlignment.Left
     inputBox.ClearTextOnFocus = true
     inputBox.Parent = content
+    addTerminalGlow(inputBox)
 
     local inputCorner = Instance.new("UICorner")
     inputCorner.CornerRadius = UDim.new(0, 6)
@@ -380,7 +462,7 @@ local function startTypingChallenge()
     feedback.BackgroundTransparency = 1
     feedback.Text = ""
     feedback.TextSize = 14
-    feedback.Font = Enum.Font.Code
+    feedback.FontFace = UITheme.Font.Mono
     feedback.TextXAlignment = Enum.TextXAlignment.Left
     feedback.Parent = content
 
@@ -478,7 +560,7 @@ local function startBugFix()
     header.BackgroundTransparency = 1
     header.Text = "🐛 BUG FIX: Find the error! (" .. timeLimit .. "s)"
     header.TextSize = 18
-    header.Font = Enum.Font.GothamBold
+    header.FontFace = UITheme.Font.Bold
     header.TextColor3 = Color3.fromRGB(255, 200, 50)
     header.TextXAlignment = Enum.TextXAlignment.Left
     header.Parent = content
@@ -490,7 +572,7 @@ local function startBugFix()
     hint.BackgroundTransparency = 1
     hint.Text = "Hint: " .. puzzle.hint
     hint.TextSize = 13
-    hint.Font = Enum.Font.Code
+    hint.FontFace = UITheme.Font.Mono
     hint.TextColor3 = Color3.fromRGB(150, 150, 200)
     hint.TextXAlignment = Enum.TextXAlignment.Left
     hint.Parent = content
@@ -503,7 +585,7 @@ local function startBugFix()
     timer.BackgroundTransparency = 1
     timer.Text = timeLimit .. "s"
     timer.TextSize = 18
-    timer.Font = Enum.Font.Code
+    timer.FontFace = UITheme.Font.Mono
     timer.TextColor3 = Color3.fromRGB(255, 100, 100)
     timer.Parent = content
 
@@ -518,7 +600,7 @@ local function startBugFix()
         lineBtn.BackgroundTransparency = 0.3
         lineBtn.Text = string.format(" %2d | %s", i, line)
         lineBtn.TextSize = 14
-        lineBtn.Font = Enum.Font.Code
+        lineBtn.FontFace = UITheme.Font.Mono
         lineBtn.TextColor3 = Color3.fromRGB(0, 200, 0)
         lineBtn.TextXAlignment = Enum.TextXAlignment.Left
         lineBtn.Parent = content
@@ -638,7 +720,7 @@ local function startDependencyHell()
     header.BackgroundTransparency = 1
     header.Text = "📦 DEPENDENCY HELL: Match packages to versions!"
     header.TextSize = 18
-    header.Font = Enum.Font.GothamBold
+    header.FontFace = UITheme.Font.Bold
     header.TextColor3 = Color3.fromRGB(255, 200, 50)
     header.TextXAlignment = Enum.TextXAlignment.Left
     header.Parent = content
@@ -649,7 +731,7 @@ local function startDependencyHell()
     timer.BackgroundTransparency = 1
     timer.Text = timeLimit .. "s"
     timer.TextSize = 18
-    timer.Font = Enum.Font.Code
+    timer.FontFace = UITheme.Font.Mono
     timer.TextColor3 = Color3.fromRGB(255, 200, 50)
     timer.Parent = content
 
@@ -665,7 +747,7 @@ local function startDependencyHell()
         btn.BackgroundColor3 = Color3.fromRGB(30, 50, 80)
         btn.Text = "  📦 " .. pkg
         btn.TextSize = 16
-        btn.Font = Enum.Font.Code
+        btn.FontFace = UITheme.Font.Mono
         btn.TextColor3 = Color3.fromRGB(100, 200, 255)
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.Parent = content
@@ -696,7 +778,7 @@ local function startDependencyHell()
         btn.BackgroundColor3 = Color3.fromRGB(50, 40, 30)
         btn.Text = "  v" .. ver
         btn.TextSize = 16
-        btn.Font = Enum.Font.Code
+        btn.FontFace = UITheme.Font.Mono
         btn.TextColor3 = Color3.fromRGB(255, 200, 100)
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.Parent = content
@@ -792,7 +874,7 @@ local function openCodingTask()
         msg.BackgroundColor3 = Color3.fromRGB(30, 10, 10)
         msg.Text = "⚡ SYSTEMS DOWN - Restore all power & servers first!"
         msg.TextSize = 18
-        msg.Font = Enum.Font.GothamBold
+        msg.FontFace = UITheme.Font.Bold
         msg.TextColor3 = Color3.fromRGB(255, 100, 100)
         msg.Parent = tempGui
 

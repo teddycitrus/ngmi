@@ -1,24 +1,34 @@
 --!strict
 --[[
 	ObjectivesUI.client.luau
-	Persistent objectives / quest-guide panel anchored to the right side of
-	the screen.  Shows phase-specific objectives that update automatically
-	when the game phase changes.
+	Persistent objectives / quest-guide panel anchored to the right side of the
+	screen. Shows phase-specific objectives that update as the game phase changes.
 
-	Design:
-	  • Dark semi-transparent glass panel matching the main HUD style
-	  • Collapsible via header click
-	  • Checkboxes that fill green as players complete objectives
-	  • Smooth fade transitions between phases
-	  • Red-tinted border during NIGHT2
-	  • First objective pulses when a new phase begins
-	  • Mobile: narrower panel, starts collapsed
+	Behaviour:
+	  * Procedural per phase: the objective list is generated each phase from a
+	    plan of anchors (always first), a pool of required tasks, and optional
+	    bonus tasks that are randomly included and shuffled, so no two runs read
+	    exactly the same.
+	  * Gated final task: each coding phase has a final coding task that stays
+	    hidden until every required (non-bonus) objective is complete, then pops
+	    into the bar with a pulse.
+	  * Toggle with J: press J to hide/show the whole panel. A small hint above
+	    the panel always shows the keybind while objectives are active.
+	  * Collapsible via header click; checkboxes fill green on completion.
+	  * Red-tinted border during NIGHT2; mobile gets a narrower, collapsed panel.
 ]]
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
+local Objectives = script.Parent:WaitForChild("Objectives")
+local ObjectivePlan = require(Objectives:WaitForChild("ObjectivePlan"))
+local ObjectivesPanel = require(Objectives:WaitForChild("ObjectivesPanel"))
+
+type Objective = ObjectivePlan.Objective
 
 -- ============================================================
 -- REMOTES
@@ -35,283 +45,214 @@ local isMobile: boolean = UserInputService.TouchEnabled
 -- ============================================================
 -- CONSTANTS
 -- ============================================================
-local PANEL_WIDTH = if isMobile then 200 else 250
-local PANEL_MARGIN = 16
-local HEADER_HEIGHT = 34
-local ROW_HEIGHT = 26
-local ROW_GAP = 4
-local CORNER_RADIUS = 12
+local PANEL_WIDTH = if isMobile then 200 else 260
+local PANEL_MARGIN = UITheme.Margin
+local PANEL_TOP = 72
+local HEADER_HEIGHT = 24
+local ROW_HEIGHT = 22
+local ROW_GAP = 2
+local CHECK_SIZE = 8
+local TOGGLE_KEY = Enum.KeyCode.J
 
-local BG_COLOR = Color3.fromRGB(12, 15, 22)
-local BG_TRANSPARENCY = 0.15
-local STROKE_COLOR_DEFAULT = Color3.fromRGB(40, 45, 60)
-local STROKE_COLOR_NIGHT = Color3.fromRGB(100, 30, 30)
-local TEXT_ACTIVE = Color3.new(1, 1, 1)
-local TEXT_COMPLETED = Color3.fromRGB(120, 130, 140)
-local CHECK_COMPLETED = Color3.fromRGB(80, 220, 100)
-
--- ============================================================
--- OBJECTIVE DEFINITIONS PER PHASE
--- ============================================================
-export type Objective = {
-	id: string,
-	text: string,
-	completed: boolean,
-	-- optional dynamic label (e.g. progress %)
-	dynamicText: string?,
-}
-
-local function makeObjectives(defs: { { id: string, text: string } }): { Objective }
-	local out: { Objective } = {}
-	for _, d in defs do
-		table.insert(out, { id = d.id, text = d.text, completed = false, dynamicText = nil })
-	end
-	return out
-end
-
-local PHASE_OBJECTIVES: { [number]: { Objective } } = {
-	[1] = makeObjectives({
-		{ id = "find_desk", text = "Find your desk" },
-		{ id = "talk_npcs", text = "Meet the staff (0/2)" },
-	}),
-	[2] = makeObjectives({
-		{ id = "code_wave1", text = "Coding sprint I: reach 50% (0%)" },
-		{ id = "code_wave2", text = "Coding sprint II: reach 100% (0%)" },
-		{ id = "collect_items", text = "Scavenge 3 supplies (0/3)" },
-		{ id = "explore_rooms", text = "Explore all 3 floors (0/3)" },
-		{ id = "poop_monster", text = "★ Bonus: defeat the Bathroom Monster" },
-		{ id = "fix_computer", text = "★ Bonus: fix a frozen PC" },
-	}),
-	[3] = makeObjectives({
-		{ id = "survive", text = "SURVIVE until dawn" },
-		{ id = "repair_panels", text = "Restore the power: fix panels" },
-		{ id = "repair_servers", text = "Repair the servers" },
-		{ id = "keep_coding", text = "Finish your project" },
-	}),
-	[4] = makeObjectives({
-		{ id = "present", text = "Present your project" },
-	}),
-}
+local HEADER_COLOR_DEFAULT = UITheme.Color.Dim
+local HEADER_COLOR_NIGHT = UITheme.Color.Danger
+local TEXT_ACTIVE = UITheme.Color.Text
+local TEXT_COMPLETED = UITheme.Color.Faint
+local CHECK_PENDING = UITheme.Color.Dim
+local CHECK_COMPLETED = UITheme.Color.Good
 
 -- ============================================================
 -- STATE
 -- ============================================================
 local currentPhase: number = 0
 local isCollapsed: boolean = isMobile -- mobile starts collapsed
+local userHidden: boolean = false -- toggled by the J key
 local objectives: { Objective } = {}
-local rowFrames: { Frame } = {}
+local rowById: { [string]: Frame } = {}
+
+-- ============================================================
+-- OBJECTIVE LOOKUP
+-- ============================================================
+--- The objectives currently eligible to render (non-gated, or revealed gated).
+local function visibleObjectives(): { Objective }
+	local out: { Objective } = {}
+	for _, obj in objectives do
+		if obj.revealed then
+			table.insert(out, obj)
+		end
+	end
+	return out
+end
+
+local function findObjective(id: string): Objective?
+	for _, obj in objectives do
+		if obj.id == id then
+			return obj
+		end
+	end
+	return nil
+end
 
 -- ============================================================
 -- GUI CREATION
 -- ============================================================
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "ObjectivesUI"
-screenGui.DisplayOrder = 15
-screenGui.ResetOnSpawn = false
-screenGui.IgnoreGuiInset = true
-screenGui.Parent = playerGui
+local SCRIM_BLEED = 48 -- how far the edge wash reaches past the text, in px
 
--- Main panel ------------------------------------------------
-local panel = Instance.new("Frame")
-panel.Name = "ObjectivesPanel"
-panel.BackgroundColor3 = BG_COLOR
-panel.BackgroundTransparency = BG_TRANSPARENCY
-panel.BorderSizePixel = 0
-panel.ClipsDescendants = true
-panel.Visible = false
-panel.Parent = screenGui
-
-local panelCorner = Instance.new("UICorner")
-panelCorner.CornerRadius = UDim.new(0, CORNER_RADIUS)
-panelCorner.Parent = panel
-
-local panelStroke = Instance.new("UIStroke")
-panelStroke.Color = STROKE_COLOR_DEFAULT
-panelStroke.Thickness = 1
-panelStroke.Parent = panel
-
--- Header (clickable) ----------------------------------------
-local headerBtn = Instance.new("TextButton")
-headerBtn.Name = "Header"
-headerBtn.Size = UDim2.new(1, 0, 0, HEADER_HEIGHT)
-headerBtn.Position = UDim2.new(0, 0, 0, 0)
-headerBtn.BackgroundTransparency = 1
-headerBtn.Text = ""
-headerBtn.Parent = panel
-
-local headerLabel = Instance.new("TextLabel")
-headerLabel.Name = "Title"
-headerLabel.Size = UDim2.new(1, -36, 1, 0)
-headerLabel.Position = UDim2.new(0, 10, 0, 0)
-headerLabel.BackgroundTransparency = 1
-headerLabel.Text = "📋 OBJECTIVES"
-headerLabel.TextSize = if isMobile then 12 else 14
-headerLabel.Font = Enum.Font.GothamBold
-headerLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
-headerLabel.TextXAlignment = Enum.TextXAlignment.Left
-headerLabel.Parent = headerBtn
-
-local arrowLabel = Instance.new("TextLabel")
-arrowLabel.Name = "Arrow"
-arrowLabel.Size = UDim2.new(0, 20, 1, 0)
-arrowLabel.Position = UDim2.new(1, -28, 0, 0)
-arrowLabel.BackgroundTransparency = 1
-arrowLabel.Text = if isCollapsed then "▲" else "▼"
-arrowLabel.TextSize = 12
-arrowLabel.Font = Enum.Font.GothamBold
-arrowLabel.TextColor3 = Color3.fromRGB(150, 150, 170)
-arrowLabel.Parent = headerBtn
-
--- Separator line under header
-local separator = Instance.new("Frame")
-separator.Name = "Separator"
-separator.Size = UDim2.new(1, -20, 0, 1)
-separator.Position = UDim2.new(0, 10, 0, HEADER_HEIGHT - 1)
-separator.BackgroundColor3 = Color3.fromRGB(40, 45, 60)
-separator.BackgroundTransparency = 0.5
-separator.BorderSizePixel = 0
-separator.Parent = panel
-
--- Content area (holds objective rows) -----------------------
-local content = Instance.new("Frame")
-content.Name = "Content"
-content.Size = UDim2.new(1, -16, 1, -HEADER_HEIGHT - 8)
-content.Position = UDim2.new(0, 8, 0, HEADER_HEIGHT + 4)
-content.BackgroundTransparency = 1
-content.ClipsDescendants = true
-content.Parent = panel
-
-local listLayout = Instance.new("UIListLayout")
-listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Padding = UDim.new(0, ROW_GAP)
-listLayout.Parent = content
+local parts = ObjectivesPanel.build(playerGui, {
+	width = PANEL_WIDTH,
+	margin = PANEL_MARGIN,
+	top = PANEL_TOP,
+	headerHeight = HEADER_HEIGHT,
+	rowGap = ROW_GAP,
+	collapsed = isCollapsed,
+})
+local hintLabel = parts.hintLabel
+local panel = parts.panel
+local scrim = parts.scrim
+local headerBtn = parts.headerBtn
+local headerLabel = parts.headerLabel
+local arrowLabel = parts.arrowLabel
+local separator = parts.separator
+local content = parts.content
 
 -- ============================================================
--- HELPERS
+-- LAYOUT HELPERS
 -- ============================================================
-
---- Compute total panel height based on current objectives
 local function computePanelHeight(): number
 	if isCollapsed then
 		return HEADER_HEIGHT
 	end
-	local rows = #objectives
-	return HEADER_HEIGHT + 8 + rows * ROW_HEIGHT + math.max(0, rows - 1) * ROW_GAP + 8
+	local rows = #visibleObjectives()
+	return HEADER_HEIGHT + 6 + rows * ROW_HEIGHT + math.max(0, rows - 1) * ROW_GAP + 4
 end
 
---- Reposition & resize the panel with a tween
 local function layoutPanel(animate: boolean)
 	local h = computePanelHeight()
 	local targetSize = UDim2.new(0, PANEL_WIDTH, 0, h)
-	local targetPos = UDim2.new(1, -(PANEL_WIDTH + PANEL_MARGIN), 0, 80)
+	local targetPos = UDim2.new(1, -(PANEL_WIDTH + PANEL_MARGIN), 0, PANEL_TOP)
+	local scrimSize = UDim2.fromOffset(PANEL_WIDTH + PANEL_MARGIN + SCRIM_BLEED, h + SCRIM_BLEED / 2)
+	scrim.Position = UDim2.new(1, 0, 0, PANEL_TOP - SCRIM_BLEED / 4)
 
 	if animate then
-		TweenService:Create(panel, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		local info = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		TweenService:Create(panel, info, {
 			Size = targetSize,
 			Position = targetPos,
 		}):Play()
+		TweenService:Create(scrim, info, { Size = scrimSize }):Play()
 	else
 		panel.Size = targetSize
 		panel.Position = targetPos
+		scrim.Size = scrimSize
 	end
 end
 
---- Create a single objective row frame
-local function createRow(index: number, obj: Objective): Frame
+-- ============================================================
+-- ROW RENDERING
+-- ============================================================
+--- Small square marker: outlined while pending, filled once complete.
+local function styleCheckbox(checkbox: Frame, completed: boolean)
+	checkbox.BackgroundColor3 = CHECK_COMPLETED
+	checkbox.BackgroundTransparency = if completed then 0 else 1
+	local stroke = checkbox:FindFirstChildOfClass("UIStroke")
+	if stroke then
+		stroke.Color = if completed then CHECK_COMPLETED else CHECK_PENDING
+	end
+end
+
+local function labelText(obj: Objective): string
+	local text = obj.dynamicText or obj.text
+	return if obj.completed then "<s>" .. text .. "</s>" else text
+end
+
+local function createRow(order: number, obj: Objective): Frame
 	local row = Instance.new("Frame")
 	row.Name = "Row_" .. obj.id
 	row.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
 	row.BackgroundTransparency = 1
-	row.LayoutOrder = index
+	row.LayoutOrder = order
 	row.Parent = content
 
-	-- Checkbox label
-	local checkbox = Instance.new("TextLabel")
+	local checkbox = Instance.new("Frame")
 	checkbox.Name = "Checkbox"
-	checkbox.Size = UDim2.new(0, 20, 1, 0)
-	checkbox.Position = UDim2.new(0, 0, 0, 0)
-	checkbox.BackgroundTransparency = 1
-	checkbox.Text = if obj.completed then "☑" else "☐"
-	checkbox.TextSize = if isMobile then 14 else 16
-	checkbox.Font = Enum.Font.GothamBold
-	checkbox.TextColor3 = if obj.completed then CHECK_COMPLETED else Color3.fromRGB(160, 165, 180)
-	checkbox.TextYAlignment = Enum.TextYAlignment.Center
+	checkbox.AnchorPoint = Vector2.new(0, 0.5)
+	checkbox.Size = UDim2.fromOffset(CHECK_SIZE, CHECK_SIZE)
+	checkbox.Position = UDim2.new(0, 1, 0.5, 0)
+	checkbox.BorderSizePixel = 0
 	checkbox.Parent = row
+	UITheme.outline(checkbox, 0)
+	styleCheckbox(checkbox, obj.completed)
 
-	-- Objective text
 	local label = Instance.new("TextLabel")
 	label.Name = "Label"
-	label.Size = UDim2.new(1, -24, 1, 0)
-	label.Position = UDim2.new(0, 24, 0, 0)
+	label.Size = UDim2.new(1, -18, 1, 0)
+	label.Position = UDim2.new(0, 18, 0, 0)
 	label.BackgroundTransparency = 1
-	label.Text = obj.dynamicText or obj.text
-	label.TextSize = if isMobile then 11 else 13
-	label.Font = Enum.Font.Gotham
+	label.RichText = true
+	label.Text = labelText(obj)
+	label.TextSize = if isMobile then 12 else 14
+	label.FontFace = UITheme.Font.Regular
 	label.TextColor3 = if obj.completed then TEXT_COMPLETED else TEXT_ACTIVE
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.TextYAlignment = Enum.TextYAlignment.Center
 	label.TextTruncate = Enum.TextTruncate.AtEnd
 	label.Parent = row
+	UITheme.textShadow(label)
 
 	return row
 end
 
---- Clear all row frames
 local function clearRows()
-	for _, rf in rowFrames do
-		if rf.Parent then rf:Destroy() end
+	for _, rf in rowById do
+		if rf.Parent then
+			rf:Destroy()
+		end
 	end
-	table.clear(rowFrames)
+	table.clear(rowById)
 end
 
---- Rebuild all rows from current objectives
 local function rebuildRows()
 	clearRows()
-	for i, obj in objectives do
-		local row = createRow(i, obj)
-		table.insert(rowFrames, row)
+	local order = 0
+	for _, obj in visibleObjectives() do
+		order += 1
+		rowById[obj.id] = createRow(order, obj)
 	end
 end
 
---- Update a single row's visual state (checkbox + text color)
-local function updateRowVisual(index: number)
-	local row = rowFrames[index]
-	local obj = objectives[index]
-	if not row or not obj then return end
-
-	local checkbox = row:FindFirstChild("Checkbox") :: TextLabel?
+--- Push an objective's current state into its row (if it has one on screen).
+local function refreshObjective(id: string)
+	local obj = findObjective(id)
+	local row = rowById[id]
+	if not obj or not row then
+		return
+	end
+	local checkbox = row:FindFirstChild("Checkbox") :: Frame?
 	local label = row:FindFirstChild("Label") :: TextLabel?
-	if not checkbox or not label then return end
-
-	checkbox.Text = if obj.completed then "☑" else "☐"
-	checkbox.TextColor3 = if obj.completed then CHECK_COMPLETED else Color3.fromRGB(160, 165, 180)
-	label.Text = obj.dynamicText or obj.text
+	if not checkbox or not label then
+		return
+	end
+	styleCheckbox(checkbox, obj.completed)
+	label.Text = labelText(obj)
 	label.TextColor3 = if obj.completed then TEXT_COMPLETED else TEXT_ACTIVE
-
-	-- Quick green flash on completion
-	if obj.completed then
-		TweenService:Create(checkbox, TweenInfo.new(0.3), {
-			TextColor3 = CHECK_COMPLETED,
-		}):Play()
-	end
 end
 
---- Pulse the first objective row to draw attention
-local function pulseFirstRow()
-	local row = rowFrames[1]
-	if not row then return end
-
+local function pulseRow(id: string)
+	local row = rowById[id]
+	if not row then
+		return
+	end
 	local label = row:FindFirstChild("Label") :: TextLabel?
-	if not label then return end
-
-	-- Pulse: brighten then back to normal
+	if not label then
+		return
+	end
 	task.spawn(function()
 		for _ = 1, 3 do
-			TweenService:Create(label, TweenInfo.new(0.25, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-				TextColor3 = Color3.fromRGB(255, 255, 150),
+			TweenService:Create(label, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {
+				TextColor3 = UITheme.Color.Warn,
 			}):Play()
 			task.wait(0.3)
-			TweenService:Create(label, TweenInfo.new(0.25, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+			TweenService:Create(label, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {
 				TextColor3 = TEXT_ACTIVE,
 			}):Play()
 			task.wait(0.3)
@@ -320,168 +261,158 @@ local function pulseFirstRow()
 end
 
 -- ============================================================
--- FIND OBJECTIVE BY ID
+-- GATED FINAL TASK
 -- ============================================================
-local function findObjective(id: string): (number?, Objective?)
-	for i, obj in objectives do
-		if obj.id == id then
-			return i, obj
+--- Every required (non-gated, non-bonus) objective is complete?
+local function allRequiredComplete(): boolean
+	local hasRequired = false
+	for _, obj in objectives do
+		if not obj.gated and not obj.optional and not obj.passive then
+			hasRequired = true
+			if not obj.completed then
+				return false
+			end
 		end
 	end
-	return nil, nil
+	return hasRequired
+end
+
+--- Reveal the gated final task once everything required is done.
+local function maybeRevealGated()
+	for _, obj in objectives do
+		if obj.gated and not obj.revealed and allRequiredComplete() then
+			obj.revealed = true
+			rebuildRows()
+			layoutPanel(true)
+			refreshObjective(obj.id)
+			pulseRow(obj.id)
+		end
+	end
+end
+
+-- ============================================================
+-- VISIBILITY (phase gate + J toggle)
+-- ============================================================
+local function applyVisibility()
+	local shouldShow = currentPhase >= 1 and currentPhase <= 3
+	hintLabel.Visible = shouldShow
+	hintLabel.Text = if userHidden then "J  objectives" else "J"
+	panel.Visible = shouldShow and not userHidden
+	scrim.Visible = panel.Visible
 end
 
 -- ============================================================
 -- PHASE TRANSITION
 -- ============================================================
 local function setPhase(phase: number)
-	local prevPhase = currentPhase
 	currentPhase = phase
 
-	-- Visibility: hide during LOBBY(0) and DAY3(4)
-	local shouldShow = phase >= 1 and phase <= 3
-	if not shouldShow then
-		-- Fade out
-		TweenService:Create(panel, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
-		task.delay(0.3, function()
-			if currentPhase == phase then -- still same phase
-				panel.Visible = false
-				panel.BackgroundTransparency = BG_TRANSPARENCY
-			end
-		end)
-		return
-	end
+	-- Header turns red during NIGHT2.
+	local headerTarget = if phase == 3 then HEADER_COLOR_NIGHT else HEADER_COLOR_DEFAULT
+	TweenService:Create(headerLabel, TweenInfo.new(0.5), { TextColor3 = headerTarget }):Play()
 
-	-- Night 2 red tint
-	if phase == 3 then
-		TweenService:Create(panelStroke, TweenInfo.new(0.5), { Color = STROKE_COLOR_NIGHT }):Play()
-	else
-		TweenService:Create(panelStroke, TweenInfo.new(0.5), { Color = STROKE_COLOR_DEFAULT }):Play()
-	end
+	-- Regenerate this phase's objectives procedurally and rebuild the rows.
+	objectives = ObjectivePlan.generate(phase)
+	rebuildRows()
+	layoutPanel(false)
+	applyVisibility()
 
-	-- Deep-copy objectives for this phase so we can mutate completion state
-	local phaseDefs = PHASE_OBJECTIVES[phase]
-	if not phaseDefs then return end
-
-	-- Fade out old rows, swap, fade in
-	local fadeDuration = if prevPhase == 0 then 0 else 0.2
-
-	-- Fade out content
-	for _, rf in rowFrames do
-		TweenService:Create(rf, TweenInfo.new(fadeDuration), {
-			BackgroundTransparency = 1,
-		}):Play()
-		local lbl = rf:FindFirstChild("Label") :: TextLabel?
-		local cb = rf:FindFirstChild("Checkbox") :: TextLabel?
-		if lbl then TweenService:Create(lbl, TweenInfo.new(fadeDuration), { TextTransparency = 1 }):Play() end
-		if cb then TweenService:Create(cb, TweenInfo.new(fadeDuration), { TextTransparency = 1 }):Play() end
-	end
-
-	task.delay(fadeDuration, function()
-		if currentPhase ~= phase then return end -- phase changed during fade
-
-		-- Build fresh objectives
-		objectives = {}
-		for _, def in phaseDefs do
-			table.insert(objectives, {
-				id = def.id,
-				text = def.text,
-				completed = false,
-				dynamicText = nil,
-			})
-		end
-
-		rebuildRows()
-		layoutPanel(true)
-
-		-- Make panel visible (might be first show)
-		panel.Visible = true
-		panel.BackgroundTransparency = BG_TRANSPARENCY
-
-		-- Fade in new rows
-		for _, rf in rowFrames do
+	-- Fade the new rows in and pulse the first one.
+	if panel.Visible then
+		for _, rf in rowById do
 			local lbl = rf:FindFirstChild("Label") :: TextLabel?
-			local cb = rf:FindFirstChild("Checkbox") :: TextLabel?
 			if lbl then
 				lbl.TextTransparency = 1
 				TweenService:Create(lbl, TweenInfo.new(0.3), { TextTransparency = 0 }):Play()
 			end
-			if cb then
-				cb.TextTransparency = 1
-				TweenService:Create(cb, TweenInfo.new(0.3), { TextTransparency = 0 }):Play()
-			end
 		end
-
-		-- Pulse first objective
-		task.delay(0.4, function()
-			if currentPhase == phase then
-				pulseFirstRow()
-			end
-		end)
-	end)
+		local first = visibleObjectives()[1]
+		if first then
+			task.delay(0.4, function()
+				if currentPhase == phase then
+					pulseRow(first.id)
+				end
+			end)
+		end
+	end
 end
 
 -- ============================================================
--- COLLAPSE / EXPAND
+-- COLLAPSE / EXPAND + J TOGGLE
 -- ============================================================
 headerBtn.Activated:Connect(function()
 	isCollapsed = not isCollapsed
-	arrowLabel.Text = if isCollapsed then "▲" else "▼"
+	arrowLabel.Text = if isCollapsed then "+" else "-"
 	content.Visible = not isCollapsed
 	separator.Visible = not isCollapsed
 	layoutPanel(true)
 end)
 
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode == TOGGLE_KEY then
+		userHidden = not userHidden
+		applyVisibility()
+	end
+end)
+
 -- ============================================================
 -- REMOTE EVENT LISTENERS
 -- ============================================================
-
--- Phase changes
 GameStateChanged.OnClientEvent:Connect(function(data: { phase: number })
 	setPhase(data.phase)
 end)
 
--- Coding progress — update the "Code at your desk" objective
+-- Coding progress drives the coding objectives (and the gated final task).
 CodingProgress.OnClientEvent:Connect(function(data: { completion: number, blocked: boolean? })
-	local idx, obj = findObjective("code_desk")
-	if idx and obj then
-		local pct = math.floor(data.completion)
-		obj.dynamicText = string.format("Code at your desk (%d%%)", pct)
-		if pct >= 100 then
-			obj.completed = true
+	local pct = math.floor(data.completion or 0)
+
+	local w1 = findObjective("code_wave1")
+	if w1 then
+		w1.dynamicText = string.format("Coding sprint I: reach 50%% (%d%%)", pct)
+		if pct >= 50 then
+			w1.completed = true
 		end
-		updateRowVisual(idx)
+		refreshObjective("code_wave1")
 	end
 
-	-- Also update "keep_coding" in Night 2 if applicable
-	local idx3, obj3 = findObjective("keep_coding")
-	if idx3 and obj3 then
-		local pct = math.floor(data.completion)
+	local w2 = findObjective("code_wave2")
+	if w2 then
+		w2.dynamicText = string.format("Ship it: finish your project (%d%%)", pct)
 		if pct >= 100 then
-			obj3.completed = true
-			updateRowVisual(idx3)
+			w2.completed = true
 		end
+		refreshObjective("code_wave2")
 	end
+
+	local kc = findObjective("keep_coding")
+	if kc then
+		kc.dynamicText = string.format("Recompile: finish your project (%d%%)", pct)
+		if pct >= 100 then
+			kc.completed = true
+		end
+		refreshObjective("keep_coding")
+	end
+
+	maybeRevealGated()
 end)
 
--- Quest / objective updates — generic. The server (ProgressionManager, QuestManager)
--- addresses an objective by id and optionally sends a fresh label (`text`) and/or
--- `completed`. We just apply whatever arrives to the matching row.
+-- Generic objective updates from the server (ProgressionManager, QuestManager):
+-- addressed by id, with an optional fresh label and/or completion flag.
 QuestUpdate.OnClientEvent:Connect(function(data: {
 	id: string,
-	name: string?,
-	description: string?,
 	progress: number?,
 	target: number?,
 	completed: boolean?,
-	active: boolean?,
 	text: string?,
 })
 	if typeof(data) ~= "table" or typeof(data.id) ~= "string" then
 		return
 	end
-	local idx, obj = findObjective(data.id)
-	if not idx or not obj then
+	local obj = findObjective(data.id)
+	if not obj then
 		return
 	end
 	if typeof(data.text) == "string" then
@@ -492,7 +423,8 @@ QuestUpdate.OnClientEvent:Connect(function(data: {
 	if data.completed then
 		obj.completed = true
 	end
-	updateRowVisual(idx)
+	refreshObjective(data.id)
+	maybeRevealGated()
 end)
 
 -- ============================================================
@@ -502,4 +434,4 @@ content.Visible = not isCollapsed
 separator.Visible = not isCollapsed
 layoutPanel(false)
 
-print("[ObjectivesUI] Initialized — objectives panel ready")
+print("[ObjectivesUI] Initialized - procedural objectives ready (J to toggle)")

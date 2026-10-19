@@ -22,6 +22,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- restore it on close.
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CursorManager = require(Shared:WaitForChild("CursorManager"))
+local UITheme = require(Shared:WaitForChild("UITheme"))
 
 -- The puzzle ScreenGui uses IgnoreGuiInset = true, so its AbsolutePosition space
 -- starts at the true top-left of the screen. UserInputService:GetMouseLocation()
@@ -196,7 +197,7 @@ local function createPuzzle(panelId: string)
     title.BackgroundTransparency = 1
     title.Text = "⚡ ELECTRICAL PANEL - RECONNECT WIRES ⚡"
     title.TextSize = 20
-    title.Font = Enum.Font.GothamBold
+    title.FontFace = UITheme.Font.Bold
     title.TextColor3 = Color3.fromRGB(255, 200, 50)
     title.Parent = panel
 
@@ -208,7 +209,7 @@ local function createPuzzle(panelId: string)
     closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
     closeBtn.Text = "✕"
     closeBtn.TextSize = 18
-    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.FontFace = UITheme.Font.Bold
     closeBtn.TextColor3 = Color3.new(1, 1, 1)
     closeBtn.Parent = panel
 
@@ -287,7 +288,7 @@ local function createPuzzle(panelId: string)
         leftLabel.BackgroundTransparency = 1
         leftLabel.Text = wireColor.name
         leftLabel.TextSize = 16
-        leftLabel.Font = Enum.Font.GothamBold
+        leftLabel.FontFace = UITheme.Font.Bold
         leftLabel.TextColor3 = wireColor.color
         leftLabel.TextXAlignment = Enum.TextXAlignment.Left
         leftLabel.Parent = wireArea
@@ -328,7 +329,7 @@ local function createPuzzle(panelId: string)
         rightLabel.BackgroundTransparency = 1
         rightLabel.Text = WIRE_COLORS[rightIndex].name
         rightLabel.TextSize = 16
-        rightLabel.Font = Enum.Font.GothamBold
+        rightLabel.FontFace = UITheme.Font.Bold
         rightLabel.TextColor3 = WIRE_COLORS[rightIndex].color
         rightLabel.TextXAlignment = Enum.TextXAlignment.Right
         rightLabel.Parent = wireArea
@@ -349,7 +350,7 @@ local function createPuzzle(panelId: string)
     hint.BackgroundTransparency = 1
     hint.Text = "Click a circle, then click the same colour on the other side"
     hint.TextSize = 14
-    hint.Font = Enum.Font.Gotham
+    hint.FontFace = UITheme.Font.Regular
     hint.TextColor3 = Color3.fromRGB(180, 180, 190)
     hint.Parent = panel
 
@@ -361,7 +362,7 @@ local function createPuzzle(panelId: string)
     warningLabel.BackgroundTransparency = 1
     warningLabel.Text = ""
     warningLabel.TextSize = 16
-    warningLabel.Font = Enum.Font.GothamBold
+    warningLabel.FontFace = UITheme.Font.Bold
     warningLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
     warningLabel.Parent = panel
 
@@ -603,7 +604,7 @@ function puzzleComplete()
         successLabel.BackgroundTransparency = 1
         successLabel.Text = "⚡ POWER RESTORED ⚡"
         successLabel.TextSize = 36
-        successLabel.Font = Enum.Font.GothamBold
+        successLabel.FontFace = UITheme.Font.Bold
         successLabel.TextColor3 = Color3.fromRGB(100, 255, 150)
         successLabel.TextStrokeTransparency = 0.3
         successLabel.TextStrokeColor3 = Color3.new(0, 0, 0)

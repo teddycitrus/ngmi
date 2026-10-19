@@ -24,6 +24,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig  = require(ReplicatedStorage.Shared.GameConfig)
 local DebugConfig = require(ReplicatedStorage.Shared.DebugConfig)
+local CursorManager = require(ReplicatedStorage.Shared.CursorManager)
+local UITheme = require(ReplicatedStorage.Shared.UITheme)
 
 local localPlayer = Players.LocalPlayer
 
@@ -39,14 +41,19 @@ local AdminCommand = Remotes:WaitForChild("AdminCommand") :: RemoteEvent
 --------------------------------------------------------------------------------
 -- Theme
 --------------------------------------------------------------------------------
-local COL_BG      = Color3.fromRGB(15, 18, 25)
-local COL_STROKE  = Color3.fromRGB(50, 55, 70)
-local COL_HEADER  = Color3.fromRGB(255, 80, 80)
-local COL_PHASE   = Color3.fromRGB(60, 90, 160)
-local COL_OFF     = Color3.fromRGB(45, 50, 62)
-local COL_ON      = Color3.fromRGB(50, 150, 70)
-local COL_TEXT    = Color3.fromRGB(230, 233, 240)
-local COL_SUBTEXT = Color3.fromRGB(150, 160, 200)
+local COL_HEADER  = UITheme.Color.Danger
+local COL_SUBTEXT = UITheme.Color.Faint
+local COL_TEXT    = UITheme.Color.Text
+local PANEL_WIDTH = 176
+local ROW_HEIGHT  = 24
+
+--- Toggle buttons tint green while on; everything else stays neutral.
+local function setToggleLook(btn: TextButton, on: boolean)
+	btn.BackgroundColor3 = if on then UITheme.Color.Good else UITheme.Color.Line
+	local alpha = if on then 0.75 else 0.95
+	btn:SetAttribute("BaseTransparency", alpha)
+	btn.BackgroundTransparency = alpha
+end
 
 --------------------------------------------------------------------------------
 -- Character state / movement
@@ -183,19 +190,12 @@ local updateCursorLabel: () -> () = function() end -- assigned once the UI exist
 
 local function setCursorFree(free: boolean)
 	cursorFree = free
+	-- The shared CursorManager owns the free/relock (and its per-frame guard keeps
+	-- the cursor free while open); pop restores whatever the pre-toggle state was.
 	if free then
-		localPlayer.CameraMode = Enum.CameraMode.Classic
-		-- Min zoom must be > first-person distance, otherwise the camera stays pinned
-		-- in first person and the mouse re-locks no matter the MouseBehavior. Forcing
-		-- it out to third person is what actually frees the cursor.
-		localPlayer.CameraMinZoomDistance = 10
-		localPlayer.CameraMaxZoomDistance = 20
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		CursorManager.push()
 	else
-		localPlayer.CameraMinZoomDistance = 0.5
-		localPlayer.CameraMaxZoomDistance = 0.5
-		localPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+		CursorManager.pop()
 	end
 	updateCursorLabel()
 end
@@ -235,37 +235,26 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = playerGui
 
--- Root panel, anchored to the right edge, vertically centred.
+-- Root panel on the left edge, vertically centred, so it stays clear of the
+-- objectives list on the right. Height follows its contents.
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.AnchorPoint = Vector2.new(1, 0.5)
-panel.Position = UDim2.new(1, -8, 0.5, 0)
-panel.Size = UDim2.new(0, 190, 0, 430)
-panel.BackgroundColor3 = COL_BG
-panel.BackgroundTransparency = 0.05
+panel.AnchorPoint = Vector2.new(0, 0.5)
+panel.Position = UDim2.new(0, UITheme.Margin, 0.5, 0)
+panel.Size = UDim2.fromOffset(PANEL_WIDTH, 0)
+panel.AutomaticSize = Enum.AutomaticSize.Y
+panel.BackgroundColor3 = UITheme.Color.Surface
+panel.BackgroundTransparency = 0.25
 panel.BorderSizePixel = 0
 panel.Parent = gui
-
-local panelCorner = Instance.new("UICorner")
-panelCorner.CornerRadius = UDim.new(0, 10)
-panelCorner.Parent = panel
-
-local panelStroke = Instance.new("UIStroke")
-panelStroke.Color = COL_STROKE
-panelStroke.Thickness = 1
-panelStroke.Parent = panel
-
-local pad = Instance.new("UIPadding")
-pad.PaddingTop = UDim.new(0, 8)
-pad.PaddingBottom = UDim.new(0, 8)
-pad.PaddingLeft = UDim.new(0, 8)
-pad.PaddingRight = UDim.new(0, 8)
-pad.Parent = panel
+UITheme.corner(panel, 6)
+UITheme.outline(panel)
+UITheme.padding(panel, 10)
 
 local layout = Instance.new("UIListLayout")
 layout.FillDirection = Enum.FillDirection.Vertical
 layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Padding = UDim.new(0, 5)
+layout.Padding = UDim.new(0, 4)
 layout.Parent = panel
 
 local order = 0
@@ -275,36 +264,23 @@ local function nextOrder(): number
 end
 
 local function makeLabel(text: string, color: Color3, size: number, height: number): TextLabel
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
+	local label = UITheme.label(panel, {
+		text = text,
+		size = size,
+		font = UITheme.Font.Bold,
+		color = color,
+		shadow = false,
+	})
 	label.Size = UDim2.new(1, 0, 0, height)
-	label.Font = Enum.Font.GothamBold
-	label.Text = text
-	label.TextSize = size
-	label.TextColor3 = color
-	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextYAlignment = Enum.TextYAlignment.Bottom
 	label.LayoutOrder = nextOrder()
-	label.Parent = panel
 	return label
 end
 
-local function makeButton(text: string, color: Color3, height: number, onClick: () -> ()): TextButton
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, 0, 0, height)
-	btn.BackgroundColor3 = color
-	btn.BorderSizePixel = 0
-	btn.AutoButtonColor = true
-	btn.Font = Enum.Font.GothamMedium
-	btn.Text = text
-	btn.TextSize = 13
-	btn.TextColor3 = COL_TEXT
+local function makeButton(text: string, height: number, onClick: () -> ()): TextButton
+	local btn = UITheme.button(panel, text, height)
+	btn.TextSize = 12
 	btn.LayoutOrder = nextOrder()
-	btn.Parent = panel
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = btn
-
 	btn.Activated:Connect(onClick)
 	return btn
 end
@@ -314,51 +290,42 @@ end
 --------------------------------------------------------------------------------
 local headerRow = Instance.new("Frame")
 headerRow.Name = "HeaderRow"
-headerRow.Size = UDim2.new(1, 0, 0, 22)
+headerRow.Size = UDim2.new(1, 0, 0, 18)
 headerRow.BackgroundTransparency = 1
 headerRow.LayoutOrder = nextOrder()
 headerRow.Parent = panel
 
-local headerLabel = Instance.new("TextLabel")
-headerLabel.BackgroundTransparency = 1
+local headerLabel = UITheme.label(headerRow, {
+	text = "ADMIN",
+	size = 11,
+	font = UITheme.Font.Bold,
+	color = COL_HEADER,
+	shadow = false,
+})
 headerLabel.Size = UDim2.new(1, -26, 1, 0)
-headerLabel.Font = Enum.Font.GothamBold
-headerLabel.Text = "🛠  ADMIN  ·  testing"
-headerLabel.TextSize = 14
-headerLabel.TextColor3 = COL_HEADER
-headerLabel.TextXAlignment = Enum.TextXAlignment.Left
-headerLabel.Parent = headerRow
 
-local minimizeBtn = Instance.new("TextButton")
+local minimizeBtn = UITheme.button(headerRow, "-", 18)
 minimizeBtn.AnchorPoint = Vector2.new(1, 0.5)
 minimizeBtn.Position = UDim2.new(1, 0, 0.5, 0)
-minimizeBtn.Size = UDim2.new(0, 22, 0, 22)
-minimizeBtn.BackgroundColor3 = COL_OFF
-minimizeBtn.BorderSizePixel = 0
-minimizeBtn.Font = Enum.Font.GothamBold
-minimizeBtn.Text = "▾"
-minimizeBtn.TextSize = 14
-minimizeBtn.TextColor3 = COL_TEXT
-minimizeBtn.Parent = headerRow
-local mbCorner = Instance.new("UICorner")
-mbCorner.CornerRadius = UDim.new(0, 6)
-mbCorner.Parent = minimizeBtn
+minimizeBtn.Size = UDim2.fromOffset(18, 18)
+minimizeBtn.FontFace = UITheme.Font.Mono
+minimizeBtn.TextSize = 12
 
 --------------------------------------------------------------------------------
 -- Phase skip section ("jump to different times")
 --------------------------------------------------------------------------------
-makeLabel("SKIP TO PHASE", COL_SUBTEXT, 11, 16)
+makeLabel("PHASE", COL_SUBTEXT, 10, 18)
 
 local PHASES = {
 	{ name = "Lobby",            id = GameConfig.Phase.LOBBY },
-	{ name = "Day 1 · dusk",     id = GameConfig.Phase.DAY1 },
-	{ name = "Day 2 · daytime",  id = GameConfig.Phase.DAY2 },
-	{ name = "Night 2 · 12 AM",  id = GameConfig.Phase.NIGHT2 },
-	{ name = "Day 3 · ending",   id = GameConfig.Phase.DAY3 },
+	{ name = "Day 1, dusk",      id = GameConfig.Phase.DAY1 },
+	{ name = "Day 2, daytime",   id = GameConfig.Phase.DAY2 },
+	{ name = "Night 2, 12 AM",   id = GameConfig.Phase.NIGHT2 },
+	{ name = "Day 3, ending",    id = GameConfig.Phase.DAY3 },
 }
 
 for _, phase in PHASES do
-	makeButton(phase.name, COL_PHASE, 26, function()
+	makeButton(phase.name, ROW_HEIGHT, function()
 		AdminCommand:FireServer({ cmd = "setPhase", phase = phase.id })
 	end)
 end
@@ -366,33 +333,33 @@ end
 --------------------------------------------------------------------------------
 -- Movement section
 --------------------------------------------------------------------------------
-makeLabel("MOVEMENT", COL_SUBTEXT, 11, 16)
+makeLabel("MOVEMENT", COL_SUBTEXT, 10, 18)
 
 local flyBtn: TextButton
-flyBtn = makeButton("Fly: OFF", COL_OFF, 26, function()
+flyBtn = makeButton("Fly: OFF", ROW_HEIGHT, function()
 	setFlying(not flying)
 	flyBtn.Text = "Fly: " .. (flying and "ON" or "OFF")
-	flyBtn.BackgroundColor3 = flying and COL_ON or COL_OFF
+	setToggleLook(flyBtn, flying)
 end)
 onFlyReset = function()
 	flyBtn.Text = "Fly: OFF"
-	flyBtn.BackgroundColor3 = COL_OFF
+	setToggleLook(flyBtn, false)
 end
 
 local noclipBtn: TextButton
-noclipBtn = makeButton("Noclip: OFF", COL_OFF, 26, function()
+noclipBtn = makeButton("Noclip: OFF", ROW_HEIGHT, function()
 	setNoclip(not noclip)
 	noclipBtn.Text = "Noclip: " .. (noclip and "ON" or "OFF")
-	noclipBtn.BackgroundColor3 = noclip and COL_ON or COL_OFF
+	setToggleLook(noclipBtn, noclip)
 end)
 onNoclipReset = function()
 	noclipBtn.Text = "Noclip: OFF"
-	noclipBtn.BackgroundColor3 = COL_OFF
+	setToggleLook(noclipBtn, false)
 end
 
 -- Fly speed stepper: [ -  speed  + ]
 local speedRow = Instance.new("Frame")
-speedRow.Size = UDim2.new(1, 0, 0, 26)
+speedRow.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
 speedRow.BackgroundTransparency = 1
 speedRow.LayoutOrder = nextOrder()
 speedRow.Parent = panel
@@ -405,18 +372,10 @@ speedLayout.Parent = speedRow
 
 local speedLabel: TextLabel
 local function makeStepBtn(text: string, delta: number): TextButton
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(0, 30, 1, 0)
-	btn.BackgroundColor3 = COL_OFF
-	btn.BorderSizePixel = 0
-	btn.Font = Enum.Font.GothamBold
-	btn.Text = text
-	btn.TextSize = 16
-	btn.TextColor3 = COL_TEXT
-	btn.Parent = speedRow
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = btn
+	local btn = UITheme.button(speedRow, text, ROW_HEIGHT)
+	btn.Size = UDim2.new(0, ROW_HEIGHT, 1, 0)
+	btn.FontFace = UITheme.Font.Mono
+	btn.TextSize = 13
 	btn.Activated:Connect(function()
 		flySpeed = math.clamp(flySpeed + delta, 10, 400)
 		speedLabel.Text = "Speed " .. flySpeed
@@ -424,15 +383,15 @@ local function makeStepBtn(text: string, delta: number): TextButton
 	return btn
 end
 
-local minusBtn = makeStepBtn("−", -20)
+local minusBtn = makeStepBtn("-", -20)
 minusBtn.LayoutOrder = 1
 
 speedLabel = Instance.new("TextLabel")
-speedLabel.Size = UDim2.new(1, -68, 1, 0)
+speedLabel.Size = UDim2.new(1, -(ROW_HEIGHT * 2 + 8), 1, 0)
 speedLabel.BackgroundTransparency = 1
-speedLabel.Font = Enum.Font.GothamMedium
+speedLabel.FontFace = UITheme.Font.Mono
 speedLabel.Text = "Speed " .. flySpeed
-speedLabel.TextSize = 13
+speedLabel.TextSize = 12
 speedLabel.TextColor3 = COL_TEXT
 speedLabel.LayoutOrder = 2
 speedLabel.Parent = speedRow
@@ -443,24 +402,24 @@ plusBtn.LayoutOrder = 3
 --------------------------------------------------------------------------------
 -- Cursor section
 --------------------------------------------------------------------------------
-makeLabel("CURSOR", COL_SUBTEXT, 11, 16)
+makeLabel("CURSOR", COL_SUBTEXT, 10, 18)
 
 local cursorBtn: TextButton
-cursorBtn = makeButton("Cursor: LOCKED  [V]", COL_OFF, 26, function()
+cursorBtn = makeButton("Cursor: LOCKED  [V]", ROW_HEIGHT, function()
 	setCursorFree(not cursorFree)
 end)
 
 updateCursorLabel = function()
 	cursorBtn.Text = "Cursor: " .. (cursorFree and "FREE" or "LOCKED") .. "  [V]"
-	cursorBtn.BackgroundColor3 = cursorFree and COL_ON or COL_OFF
+	setToggleLook(cursorBtn, cursorFree)
 end
 
-makeLabel("Press V to click these buttons.", COL_SUBTEXT, 10, 14)
+local hint = makeLabel("Press V to click these buttons.", COL_SUBTEXT, 10, 16)
+hint.FontFace = UITheme.Font.Regular
 
 --------------------------------------------------------------------------------
 -- Minimize / expand — collapse to just the header bar to get it out of the way.
 --------------------------------------------------------------------------------
-local EXPANDED_SIZE = panel.Size
 local minimized = false
 local function setMinimized(m: boolean)
 	minimized = m
@@ -469,8 +428,7 @@ local function setMinimized(m: boolean)
 			child.Visible = not m
 		end
 	end
-	panel.Size = if m then UDim2.new(0, 190, 0, 38) else EXPANDED_SIZE
-	minimizeBtn.Text = if m then "▸" else "▾"
+	minimizeBtn.Text = if m then "+" else "-"
 end
 minimizeBtn.Activated:Connect(function()
 	setMinimized(not minimized)

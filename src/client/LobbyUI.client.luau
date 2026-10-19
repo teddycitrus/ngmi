@@ -22,6 +22,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -59,9 +60,9 @@ local COLORS = {
 	leaveRed       = Color3.fromRGB(150, 30, 35),
 }
 
-local FONT_TITLE = Font.fromEnum(Enum.Font.GothamBold)
-local FONT_BODY  = Font.fromEnum(Enum.Font.Gotham)
-local FONT_MONO  = Font.fromEnum(Enum.Font.Code)
+local FONT_TITLE = UITheme.Font.Bold
+local FONT_BODY  = UITheme.Font.Regular
+local FONT_MONO  = UITheme.Font.Mono
 
 local CORNER_RADIUS = UDim.new(0, 10)
 local CARD_CORNER   = UDim.new(0, 12)

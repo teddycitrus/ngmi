@@ -28,27 +28,30 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 
 local CursorManager = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CursorManager"))
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
 
 --------------------------------------------------------------------------------
 -- Constants
 --------------------------------------------------------------------------------
 
 local TYPEWRITER_CHARS_PER_SEC = 30
-local DIALOGUE_BOX_CORNER_RADIUS = 12
-local BUTTON_CORNER_RADIUS = 8
+local DIALOGUE_BOX_CORNER_RADIUS = 6
+local BUTTON_CORNER_RADIUS = 4
+local DIALOGUE_MAX_WIDTH = 760
 local MIN_TOUCH_TARGET_PX = 44 -- minimum touch target for mobile accessibility
 local FADE_DURATION = 0.25 -- seconds for GUI fade in/out
 
 -- Colors
 local BG_OVERLAY_COLOR = Color3.new(0, 0, 0)
-local BG_OVERLAY_TRANSPARENCY = 0.5
-local DIALOGUE_BG_COLOR = Color3.fromRGB(25, 25, 35)
-local DIALOGUE_BG_TRANSPARENCY = 0.08
-local TEXT_COLOR = Color3.fromRGB(230, 230, 230)
-local BUTTON_BG_COLOR = Color3.fromRGB(40, 40, 55)
-local BUTTON_HOVER_COLOR = Color3.fromRGB(60, 60, 80)
-local BUTTON_TEXT_COLOR = Color3.fromRGB(200, 200, 200)
-local CLOSE_BUTTON_COLOR = Color3.fromRGB(180, 50, 50)
+local BG_OVERLAY_TRANSPARENCY = 0.6
+local DIALOGUE_BG_COLOR = UITheme.Color.Surface
+local DIALOGUE_BG_TRANSPARENCY = 0.2
+local TEXT_COLOR = UITheme.Color.Text
+local BUTTON_BG_COLOR = UITheme.Color.Line
+local BUTTON_SHOWN_TRANSPARENCY = 0.96
+local BUTTON_HOVER_TRANSPARENCY = 0.9
+local BUTTON_TEXT_COLOR = UITheme.Color.Dim
+local BUTTON_HOVER_TEXT_COLOR = UITheme.Color.Text
 
 --------------------------------------------------------------------------------
 -- State
@@ -162,8 +165,8 @@ local function createDialogueGui(data: any): ScreenGui
 	local dialogueFrame = Instance.new("Frame")
 	dialogueFrame.Name = "DialogueFrame"
 	dialogueFrame.Size = UDim2.new(0.85, 0, 0, 0) -- height will be set dynamically
-	dialogueFrame.Position = UDim2.new(0.075, 0, 1, 0) -- starts offscreen, will slide up
-	dialogueFrame.AnchorPoint = Vector2.new(0, 1)
+	dialogueFrame.Position = UDim2.new(0.5, 0, 1, 0) -- starts offscreen, will slide up
+	dialogueFrame.AnchorPoint = Vector2.new(0.5, 1)
 	dialogueFrame.BackgroundColor3 = DIALOGUE_BG_COLOR
 	dialogueFrame.BackgroundTransparency = DIALOGUE_BG_TRANSPARENCY
 	dialogueFrame.BorderSizePixel = 0
@@ -175,19 +178,18 @@ local function createDialogueGui(data: any): ScreenGui
 	corner.CornerRadius = UDim.new(0, DIALOGUE_BOX_CORNER_RADIUS)
 	corner.Parent = dialogueFrame
 
-	-- Subtle border stroke
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(80, 80, 100)
-	stroke.Thickness = 1.5
-	stroke.Transparency = 0.5
-	stroke.Parent = dialogueFrame
+	-- Hairline border, and a width cap so wide screens don't stretch the text
+	UITheme.outline(dialogueFrame)
+	local widthCap = Instance.new("UISizeConstraint")
+	widthCap.MaxSize = Vector2.new(DIALOGUE_MAX_WIDTH, math.huge)
+	widthCap.Parent = dialogueFrame
 
 	-- Padding inside dialogue frame
 	local padding = Instance.new("UIPadding")
-	padding.PaddingTop = UDim.new(0, 16)
-	padding.PaddingBottom = UDim.new(0, 16)
-	padding.PaddingLeft = UDim.new(0, 20)
-	padding.PaddingRight = UDim.new(0, 20)
+	padding.PaddingTop = UDim.new(0, 18)
+	padding.PaddingBottom = UDim.new(0, 18)
+	padding.PaddingLeft = UDim.new(0, 22)
+	padding.PaddingRight = UDim.new(0, 22)
 	padding.Parent = dialogueFrame
 
 	-- Layout for vertical stacking
@@ -200,12 +202,12 @@ local function createDialogueGui(data: any): ScreenGui
 	-- NPC Name label
 	local nameLabel = Instance.new("TextLabel")
 	nameLabel.Name = "NPCName"
-	nameLabel.Size = UDim2.new(1, 0, 0, 28)
+	nameLabel.Size = UDim2.new(1, -30, 0, 14)
 	nameLabel.BackgroundTransparency = 1
-	nameLabel.Text = npcName
+	nameLabel.Text = string.upper(npcName)
 	nameLabel.TextColor3 = nameColor
-	nameLabel.Font = Enum.Font.GothamBold
-	nameLabel.TextSize = 22
+	nameLabel.FontFace = UITheme.Font.Bold
+	nameLabel.TextSize = 12
 	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
 	nameLabel.LayoutOrder = 1
 	nameLabel.Parent = dialogueFrame
@@ -217,8 +219,9 @@ local function createDialogueGui(data: any): ScreenGui
 	textLabel.BackgroundTransparency = 1
 	textLabel.Text = ""
 	textLabel.TextColor3 = TEXT_COLOR
-	textLabel.Font = Enum.Font.Gotham
+	textLabel.FontFace = UITheme.Font.Regular
 	textLabel.TextSize = 18
+	textLabel.LineHeight = 1.15
 	textLabel.TextXAlignment = Enum.TextXAlignment.Left
 	textLabel.TextYAlignment = Enum.TextYAlignment.Top
 	textLabel.TextWrapped = true
@@ -238,7 +241,7 @@ local function createDialogueGui(data: any): ScreenGui
 	local buttonLayout = Instance.new("UIListLayout")
 	buttonLayout.FillDirection = Enum.FillDirection.Vertical
 	buttonLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	buttonLayout.Padding = UDim.new(0, 8)
+	buttonLayout.Padding = UDim.new(0, 4)
 	buttonLayout.Parent = buttonContainer
 
 	-- Create response buttons (initially hidden, shown after typewriter finishes)
@@ -248,12 +251,14 @@ local function createDialogueGui(data: any): ScreenGui
 		local optionData = option :: any
 		local btn = Instance.new("TextButton")
 		btn.Name = "Response_" .. tostring(i)
-		btn.Size = UDim2.new(1, 0, 0, math.max(MIN_TOUCH_TARGET_PX, 44))
+		btn.Size = UDim2.new(1, 0, 0, MIN_TOUCH_TARGET_PX)
+		btn.AutoButtonColor = false
+		btn.BorderSizePixel = 0
 		btn.BackgroundColor3 = BUTTON_BG_COLOR
-		btn.Text = "  " .. (optionData.text :: string)
+		btn.Text = optionData.text :: string
 		btn.TextColor3 = BUTTON_TEXT_COLOR
-		btn.Font = Enum.Font.Gotham
-		btn.TextSize = 16
+		btn.FontFace = UITheme.Font.Medium
+		btn.TextSize = 15
 		btn.TextXAlignment = Enum.TextXAlignment.Left
 		btn.TextWrapped = true
 		btn.AutomaticSize = Enum.AutomaticSize.Y
@@ -270,25 +275,23 @@ local function createDialogueGui(data: any): ScreenGui
 		local btnPadding = Instance.new("UIPadding")
 		btnPadding.PaddingTop = UDim.new(0, 10)
 		btnPadding.PaddingBottom = UDim.new(0, 10)
-		btnPadding.PaddingLeft = UDim.new(0, 12)
-		btnPadding.PaddingRight = UDim.new(0, 12)
+		btnPadding.PaddingLeft = UDim.new(0, 14)
+		btnPadding.PaddingRight = UDim.new(0, 14)
 		btnPadding.Parent = btn
 
-		local btnStroke = Instance.new("UIStroke")
-		btnStroke.Color = Color3.fromRGB(70, 70, 90)
-		btnStroke.Thickness = 1
-		btnStroke.Transparency = 0.6
-		btnStroke.Parent = btn
+		UITheme.outline(btn)
 
 		-- Hover effect
 		btn.MouseEnter:Connect(function()
 			TweenService:Create(btn, TweenInfo.new(0.15), {
-				BackgroundColor3 = BUTTON_HOVER_COLOR,
+				BackgroundTransparency = BUTTON_HOVER_TRANSPARENCY,
+				TextColor3 = BUTTON_HOVER_TEXT_COLOR,
 			}):Play()
 		end)
 		btn.MouseLeave:Connect(function()
 			TweenService:Create(btn, TweenInfo.new(0.15), {
-				BackgroundColor3 = BUTTON_BG_COLOR,
+				BackgroundTransparency = BUTTON_SHOWN_TRANSPARENCY,
+				TextColor3 = BUTTON_TEXT_COLOR,
 			}):Play()
 		end)
 
@@ -315,25 +318,27 @@ local function createDialogueGui(data: any): ScreenGui
 	-- Close button (X) in top-right corner of dialogue frame
 	local closeBtn = Instance.new("TextButton")
 	closeBtn.Name = "CloseButton"
-	closeBtn.Size = UDim2.new(0, 36, 0, 36)
-	closeBtn.Position = UDim2.new(1, 4, 0, -16)
-	closeBtn.AnchorPoint = Vector2.new(1, 0)
-	closeBtn.BackgroundColor3 = CLOSE_BUTTON_COLOR
-	closeBtn.BackgroundTransparency = 0.3
-	closeBtn.Text = "✕"
-	closeBtn.TextColor3 = Color3.new(1, 1, 1)
-	closeBtn.Font = Enum.Font.GothamBold
-	closeBtn.TextSize = 18
+	closeBtn.Size = UDim2.new(0, 44, 0, 24)
+	closeBtn.Position = UDim2.new(1, 30, 0.5, 0)
+	closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Right
+	closeBtn.AutoButtonColor = false
+	closeBtn.BackgroundTransparency = 1
+	closeBtn.Text = "CLOSE"
+	closeBtn.TextColor3 = UITheme.Color.Faint
+	closeBtn.FontFace = UITheme.Font.Mono
+	closeBtn.TextSize = 10
 	closeBtn.Modal = true
-	closeBtn.LayoutOrder = -1 -- don't participate in layout, use absolute position
-	closeBtn.Parent = dialogueFrame
+	-- Parented to the name row rather than the frame so the UIListLayout leaves
+	-- it alone; it sits at the right end of that row.
+	closeBtn.Parent = nameLabel
 
-	-- Remove from layout by making it not affected by UIListLayout
-	closeBtn.AnchorPoint = Vector2.new(1, 0)
-
-	local closeBtnCorner = Instance.new("UICorner")
-	closeBtnCorner.CornerRadius = UDim.new(0, 18)
-	closeBtnCorner.Parent = closeBtn
+	closeBtn.MouseEnter:Connect(function()
+		closeBtn.TextColor3 = UITheme.Color.Text
+	end)
+	closeBtn.MouseLeave:Connect(function()
+		closeBtn.TextColor3 = UITheme.Color.Faint
+	end)
 
 	closeBtn.Activated:Connect(function()
 		NPCDialogueChoice:FireServer({
@@ -358,9 +363,9 @@ local function createDialogueGui(data: any): ScreenGui
 		}):Play()
 
 		-- Slide dialogue frame up from bottom
-		dialogueFrame.Position = UDim2.new(0.075, 0, 1, 20) -- start below screen
-		TweenService:Create(dialogueFrame, TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-			Position = UDim2.new(0.075, 0, 1, -30), -- 30px from bottom
+		dialogueFrame.Position = UDim2.new(0.5, 0, 1, 20) -- start below screen
+		TweenService:Create(dialogueFrame, TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+			Position = UDim2.new(0.5, 0, 1, -40), -- 40px from bottom
 		}):Play()
 
 		task.wait(FADE_DURATION)
@@ -371,7 +376,7 @@ local function createDialogueGui(data: any): ScreenGui
 			for idx, btn in responseButtons do
 				task.wait(0.08) -- stagger button appearance
 				TweenService:Create(btn, TweenInfo.new(0.2), {
-					BackgroundTransparency = 0.1,
+					BackgroundTransparency = BUTTON_SHOWN_TRANSPARENCY,
 					TextTransparency = 0,
 				}):Play()
 			end
@@ -385,7 +390,7 @@ local function createDialogueGui(data: any): ScreenGui
 			skipTypewriter(textLabel, dialogueText)
 			-- Reveal buttons immediately
 			for _, btn in responseButtons do
-				btn.BackgroundTransparency = 0.1
+				btn.BackgroundTransparency = BUTTON_SHOWN_TRANSPARENCY
 				btn.TextTransparency = 0
 			end
 		end
@@ -399,7 +404,7 @@ local function createDialogueGui(data: any): ScreenGui
 			if typewriterThread then
 				skipTypewriter(textLabel, dialogueText)
 				for _, btn in responseButtons do
-					btn.BackgroundTransparency = 0.1
+					btn.BackgroundTransparency = BUTTON_SHOWN_TRANSPARENCY
 					btn.TextTransparency = 0
 				end
 			end
@@ -458,7 +463,7 @@ function closeDialogue()
 		end
 		if dialogueFrame then
 			TweenService:Create(dialogueFrame, TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-				Position = UDim2.new(0.075, 0, 1, 20),
+				Position = UDim2.new(0.5, 0, 1, 20),
 			}):Play()
 		end
 
