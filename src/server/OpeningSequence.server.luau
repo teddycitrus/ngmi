@@ -4,7 +4,9 @@
 -- DAY1 opening ceremony. When the match starts, the named NPCs (and the player)
 -- are gathered in the ground-floor auditorium: the organizer gives a short
 -- welcome talk at the lectern while everyone else is seated facing the stage.
--- A ~8s cinematic plays on each client (CutsceneManager "opening"). Afterwards
+-- A cinematic plays on each client (CutsceneManager "opening", shot list in
+-- Shared.OpeningCinematic): an establishing crane on the building, then cuts
+-- around the hall while the organizer gestures through each line. Afterwards
 -- the NPCs get up and disperse to their own floors so the hackathon can begin.
 --
 -- This script only repositions the NPC models that NPCManager spawns; it never
@@ -47,12 +49,25 @@ local ORG_LINES = {
 	"That is everything. Demos are Sunday. Now go build something. Good luck, hackers!",
 }
 
--- Cinematic camera framing — sits in the open floor between the stage and the
--- front pew and looks back at the speaker at the lectern, so the seating never
--- blocks the shot. Slow push-in toward them.
-local CAM_LOOK = Vector3.new(CX - 14, 5.5, STAGE_Z1 - 5) -- the organizer's chest/head
-local CAM_START = Vector3.new(CX - 8, 7, STAGE_Z1 + 6)
-local CAM_END = Vector3.new(CX - 11, 6, STAGE_Z1 + 1.5)
+-- The organizer's body language, one gesture per line (SpeakerChoreo.GESTURES).
+-- "sprint" also walks her out from behind the lectern to SPEAKER_MARK.
+local ORG_GESTURES = { "welcome", "point", "emphasis", "shrug_sweep", "sprint", "count", "cheer" }
+
+-- Seconds of exterior establishing shot before the talk begins.
+local INTRO_SECONDS = 4.5
+local PER_LINE = 3.4
+
+-- Centre stage, clear of the lectern, where she delivers the second half.
+local SPEAKER_MARK = Vector3.new(CX - 4, FLOOR_Y + 5, STAGE_Z1 - 4)
+
+-- Establishing crane up the south facade, from the plaza.
+local EXTERIOR = {
+	from = Vector3.new(-70, 4, -228),
+	to = Vector3.new(-40, 38, -195),
+	look = Vector3.new(-30, 24, -100),
+}
+
+-- Where the player is seated for the talk.
 local PLAYER_SEAT_NEAR = Vector3.new(CX + 8, 9, -30)
 
 -- the seven NPCs that take a seat (the organizer presents instead)
@@ -236,9 +251,12 @@ local function runOpening()
 		CutsceneTrigger:FireClient(plr, {
 			cutscene = "opening",
 			lines = ORG_LINES,
-			camStart = CAM_START,
-			camEnd = CAM_END,
-			lookAt = CAM_LOOK,
+			gestures = ORG_GESTURES,
+			intro = INTRO_SECONDS,
+			aud = AUD,
+			speakerPos = SPEAKER_POS,
+			speakerMark = SPEAKER_MARK,
+			exterior = EXTERIOR,
 			seatNear = PLAYER_SEAT_NEAR,
 			-- where to drop the player when the cutscene ends: the hallway just
 			-- outside the auditorium's north door, on their feet and free to move.
@@ -246,9 +264,9 @@ local function runOpening()
 		})
 	end
 
-	-- Let the talk play out (scales with the number of guide lines, ~3.4s each, to
+	-- Let the talk play out (intro + one beat per line + the applause outro, to
 	-- match the client cinematic), then everyone disperses.
-	task.wait(#ORG_LINES * 3.4 + 1.5)
+	task.wait(INTRO_SECONDS + #ORG_LINES * PER_LINE + 2.8)
 
 	-- Each NPC stands, walks up the centre aisle to the north doorway, steps into
 	-- the corridor and rounds the corner — then (now out of sight) is relocated to

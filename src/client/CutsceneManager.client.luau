@@ -10,8 +10,19 @@
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- Lighting was previously fetched ad hoc inside individual scene functions; the
+-- shared cinematic helpers below need it at module scope.
+local Lighting = game:GetService("Lighting")
+
+local CursorManager = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CursorManager"))
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local RigPose = require(Shared:WaitForChild("RigPose"))
+local CutsceneActors = require(Shared:WaitForChild("CutsceneActors"))
+local NGMIMutation = require(Shared:WaitForChild("NGMIMutation"))
+local NGMIChoreo = require(Shared:WaitForChild("NGMIChoreo"))
+local OpeningCinematic = require(Shared:WaitForChild("OpeningCinematic"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
@@ -49,14 +60,97 @@ end
 -- Gameplay runs in LockFirstPerson, which pins the cursor to screen-centre and
 -- hides it; switching CameraMode off Lock stops it being re-centred each frame.
 local function unlockCursor()
-    player.CameraMode = Enum.CameraMode.Classic
-    -- The camera is pinned at first-person zoom (0.5); at that zoom the mouse
-    -- re-locks no matter the CameraMode, so widen the zoom to pull it out to third
-    -- person where the cursor is genuinely free.
-    player.CameraMinZoomDistance = 10
-    player.CameraMaxZoomDistance = 16
-    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-    UserInputService.MouseIconEnabled = true
+    -- Route through the shared CursorManager: its per-frame guard holds the cursor
+    -- free for as long as the scene is open, so a first-person re-lock can't trap it.
+    CursorManager.push()
+end
+
+--- Partner to unlockCursor. MUST be called once for every unlockCursor, at the
+--- point the scene actually closes.
+---
+--- CursorManager is reference-counted and its per-frame guard keeps the cursor
+--- free for as long as openCount > 0. An unbalanced push therefore doesn't just
+--- leak a counter: it pins the camera in third person at zoom 10-16 and leaves
+--- the mouse free for the REST OF THE SESSION, so gameplay never returns to
+--- LockFirstPerson.
+local function relockCursor()
+    CursorManager.pop()
+end
+
+-- ============================================================
+-- CINEMATIC CAMERA
+-- ============================================================
+-- Shared rig for every cutscene beat: Cubic camera paths, lens FOV pulls, and a
+-- motion blur that is driven from the SAME tween clock as the move, so the blur
+-- ramps with the camera instead of drifting out of sync with it.
+--
+-- The blur instance is private to this module (CutsceneBlur). LightingController
+-- owns GameBlur for the phase look and NGMIClient owns NGMIProximityBlur, so
+-- reusing either here would fight those systems mid-scene.
+local DEFAULT_FOV = 70
+
+local cutsceneBlur: BlurEffect? = nil
+
+local function getCutsceneBlur(): BlurEffect
+    local existing = Lighting:FindFirstChild("CutsceneBlur")
+    if existing and existing:IsA("BlurEffect") then
+        return existing
+    end
+    local b = Instance.new("BlurEffect")
+    b.Name = "CutsceneBlur"
+    b.Size = 0
+    b.Parent = Lighting
+    cutsceneBlur = b
+    return b
+end
+
+--- Ease the camera along a path to `goal` over `duration`.
+--- Cubic InOut is the house easing for cutscene moves: it leaves and arrives
+--- almost stationary, which reads as a camera operator rather than a lerp.
+local function cameraMove(goal: CFrame, duration: number, direction: Enum.EasingDirection?): Tween
+    camera.CameraType = Enum.CameraType.Scriptable
+    local info = TweenInfo.new(
+        duration,
+        Enum.EasingStyle.Cubic,
+        direction or Enum.EasingDirection.InOut
+    )
+    local tween = TweenService:Create(camera, info, { CFrame = goal })
+    tween:Play()
+    return tween
+end
+
+--- Lens pull. A slow push-in tightens the frame; a fast one snaps focus onto a
+--- reveal. Runs on the same Cubic curve as the camera move so a simultaneous
+--- move + pull feel like one gesture.
+local function fovPull(targetFov: number, duration: number, direction: Enum.EasingDirection?): Tween
+    local info = TweenInfo.new(
+        duration,
+        Enum.EasingStyle.Cubic,
+        direction or Enum.EasingDirection.InOut
+    )
+    local tween = TweenService:Create(camera, info, { FieldOfView = targetFov })
+    tween:Play()
+    return tween
+end
+
+--- Motion blur ramp, matched to a move's duration so the two stay locked.
+local function motionBlur(size: number, duration: number): Tween
+    local blur = getCutsceneBlur()
+    local info = TweenInfo.new(duration, Enum.EasingStyle.Cubic, Enum.EasingDirection.InOut)
+    local tween = TweenService:Create(blur, info, { Size = size })
+    tween:Play()
+    return tween
+end
+
+--- Put the lens back where gameplay expects it. Called at every scene teardown
+--- alongside restoring CameraType, so a cutscene can never strand the player on
+--- a 40-degree FOV or a blurred frame.
+local function resetLens()
+    TweenService:Create(camera, TweenInfo.new(0.4, Enum.EasingStyle.Cubic), { FieldOfView = DEFAULT_FOV }):Play()
+    local blur = cutsceneBlur or Lighting:FindFirstChild("CutsceneBlur")
+    if blur and blur:IsA("BlurEffect") then
+        TweenService:Create(blur, TweenInfo.new(0.4), { Size = 0 }):Play()
+    end
 end
 
 local function createOverlayGui(name: string): (ScreenGui, Frame)
@@ -98,7 +192,7 @@ local function showText(parent: Frame, text: string, size: number, color: Color3
     label.BackgroundTransparency = 1
     label.Text = text
     label.TextSize = size
-    label.Font = font or Enum.Font.GothamBold
+    label.FontFace = if font then Font.fromEnum(font) else UITheme.Font.Bold
     label.TextColor3 = color
     label.TextTransparency = 1
     label.TextWrapped = true
@@ -132,7 +226,6 @@ local function playSleepCutscene()
     local humanoid = char and char:FindFirstChildOfClass("Humanoid")
     local origWalk = 11
     if humanoid and humanoid.WalkSpeed > 0 then origWalk = humanoid.WalkSpeed end
-    local Lighting = game:GetService("Lighting")
 
     local gui = Instance.new("ScreenGui")
     gui.Name = "SleepCutscene"
@@ -169,7 +262,7 @@ local function playSleepCutscene()
     thought.Size = UDim2.new(0.72, 0, 0, 140)
     thought.Position = UDim2.new(0.5, 0, 0.62, 0)
     thought.BackgroundTransparency = 1
-    thought.Font = Enum.Font.Gotham
+    thought.FontFace = UITheme.Font.Regular
     thought.TextSize = 26
     thought.TextColor3 = Color3.fromRGB(210, 210, 225)
     thought.TextStrokeTransparency = 0.6
@@ -188,6 +281,8 @@ local function playSleepCutscene()
     end
 
     -- (1) Drowsy — still on their feet. Slow the walk, swim the vision in and out.
+    -- The lens creeps in as consciousness narrows; resetLens on waking puts it back.
+    fovPull(54, 6)
     local blur = Instance.new("BlurEffect")
     blur.Name = "SleepBlur"
     blur.Size = 0
@@ -232,19 +327,70 @@ local function playSleepCutscene()
     if humanoid then humanoid.WalkSpeed = origWalk end
     if blur.Parent then blur:Destroy() end
     gui:Destroy()
+    resetLens()
     enableControls()
 end
+
+-- ============================================================
+-- ENDING SCREEN TEARDOWN
+-- ============================================================
+-- Both endings free the cursor for their "Return to Lobby" button, so every way
+-- off the screen has to release it, not just that button: the server does not
+-- act on requestLobby yet (HANDOFF G7), and a phase change (a new match, an
+-- admin skip) is the other exit. A leaked push pins the camera in third person
+-- for the rest of the session.
+local closeEnding: (() -> ())? = nil
+
+--- Take the cursor for an ending screen and return its one-shot close.
+local function openEndingScreen(gui: ScreenGui): () -> ()
+    if closeEnding then
+        closeEnding() -- a second ending replaces the first
+    end
+    unlockCursor()
+    local closed = false
+    local function close()
+        if closed then
+            return
+        end
+        closed = true
+        if closeEnding == close then
+            closeEnding = nil
+        end
+        gui:Destroy()
+        relockCursor()
+        resetLens()
+        camera.CameraType = Enum.CameraType.Custom
+        local character = player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            camera.CameraSubject = humanoid
+        end
+        enableControls()
+    end
+    closeEnding = close
+    return close
+end
+
+GameStateChanged.OnClientEvent:Connect(function(data: { phase: number })
+    if typeof(data) == "table" and data.phase ~= 4 and closeEnding then
+        closeEnding()
+    end
+end)
 
 -- ============================================================
 -- BAD ENDING
 -- ============================================================
 local function playBadEnding()
     disableControls()
-    unlockCursor()
 
     camera.CameraType = Enum.CameraType.Scriptable
+    -- Long, slow constriction across the whole ending: the frame closes in on a
+    -- player who didn't make it.
+    camera.FieldOfView = DEFAULT_FOV
+    fovPull(52, 12)
 
     local gui, bg = createOverlayGui("BadEnding")
+    local closeScreen = openEndingScreen(gui)
 
     -- Morning light - briefly show the scene
     task.wait(1)
@@ -294,7 +440,7 @@ local function playBadEnding()
     ngmiText.BackgroundTransparency = 1
     ngmiText.Text = "You are NGMI now."
     ngmiText.TextSize = 56
-    ngmiText.Font = Enum.Font.Creepster
+    ngmiText.FontFace = UITheme.Font.Bold
     ngmiText.TextColor3 = Color3.fromRGB(255, 0, 0)
     ngmiText.TextTransparency = 1
     ngmiText.TextStrokeTransparency = 0.5
@@ -314,7 +460,7 @@ local function playBadEnding()
     gameOverText.BackgroundTransparency = 1
     gameOverText.Text = "GAME OVER"
     gameOverText.TextSize = 24
-    gameOverText.Font = Enum.Font.Code
+    gameOverText.FontFace = UITheme.Font.Mono
     gameOverText.TextColor3 = Color3.fromRGB(150, 150, 150)
     gameOverText.Parent = bg
 
@@ -325,7 +471,7 @@ local function playBadEnding()
     lobbyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
     lobbyBtn.Text = "Return to Lobby"
     lobbyBtn.TextSize = 18
-    lobbyBtn.Font = Enum.Font.GothamBold
+    lobbyBtn.FontFace = UITheme.Font.Bold
     lobbyBtn.TextColor3 = Color3.new(1, 1, 1)
     lobbyBtn.Parent = bg
 
@@ -334,16 +480,7 @@ local function playBadEnding()
     btnCorner.Parent = lobbyBtn
 
     lobbyBtn.Activated:Connect(function()
-        gui:Destroy()
-        camera.CameraType = Enum.CameraType.Custom
-        local character = player.Character
-        if character then
-            local humanoid = character:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                camera.CameraSubject = humanoid
-            end
-        end
-        enableControls()
+        closeScreen()
         -- Request server to return to lobby
         GameStateChanged:FireServer({ requestLobby = true })
     end)
@@ -354,11 +491,14 @@ end
 -- ============================================================
 local function playTrueEnding()
     disableControls()
-    unlockCursor()
 
     camera.CameraType = Enum.CameraType.Scriptable
+    -- The opposite gesture to the bad ending: the lens opens out into the morning.
+    camera.FieldOfView = 58
+    fovPull(78, 12)
 
     local gui, bg = createOverlayGui("TrueEnding")
+    local closeScreen = openEndingScreen(gui)
 
     -- Golden sunrise
     bg.BackgroundColor3 = Color3.fromRGB(255, 220, 150)
@@ -378,7 +518,7 @@ local function playTrueEnding()
     dissolveText.BackgroundTransparency = 1
     dissolveText.Text = "The remaining NGMIs dissolve into lines of code..."
     dissolveText.TextSize = 20
-    dissolveText.Font = Enum.Font.GothamMedium
+    dissolveText.FontFace = UITheme.Font.Medium
     dissolveText.TextColor3 = Color3.fromRGB(100, 255, 150)
     dissolveText.TextTransparency = 0.3
     dissolveText.Parent = gui
@@ -428,7 +568,7 @@ local function playTrueEnding()
     checkText.BackgroundColor3 = Color3.fromRGB(255, 250, 230)
     checkText.Text = "💰 $10,000 GRAND PRIZE 💰"
     checkText.TextSize = 42
-    checkText.Font = Enum.Font.GothamBold
+    checkText.FontFace = UITheme.Font.Bold
     checkText.TextColor3 = Color3.fromRGB(50, 50, 10)
     checkText.TextTransparency = 1
     checkText.Parent = bg
@@ -470,7 +610,7 @@ local function playTrueEnding()
         "And maybe shower first.",
     }, "\n")
     credits.TextSize = 18
-    credits.Font = Enum.Font.GothamMedium
+    credits.FontFace = UITheme.Font.Medium
     credits.TextColor3 = Color3.fromRGB(200, 200, 220)
     credits.Parent = bg
 
@@ -488,7 +628,7 @@ local function playTrueEnding()
     lobbyBtn.BackgroundColor3 = Color3.fromRGB(50, 120, 50)
     lobbyBtn.Text = "🏆 Return to Lobby"
     lobbyBtn.TextSize = 20
-    lobbyBtn.Font = Enum.Font.GothamBold
+    lobbyBtn.FontFace = UITheme.Font.Bold
     lobbyBtn.TextColor3 = Color3.new(1, 1, 1)
     lobbyBtn.Parent = bg
 
@@ -497,161 +637,24 @@ local function playTrueEnding()
     btnCorner.Parent = lobbyBtn
 
     lobbyBtn.Activated:Connect(function()
-        gui:Destroy()
-        camera.CameraType = Enum.CameraType.Custom
-        local character = player.Character
-        if character then
-            local humanoid = character:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                camera.CameraSubject = humanoid
-            end
-        end
-        enableControls()
+        closeScreen()
         GameStateChanged:FireServer({ requestLobby = true })
     end)
 end
 
 -- ============================================================
--- OPENING CUTSCENE (Day 1 start — the organizer's welcome talk)
--- A short (~8s) cinematic: letterbox bars slide in, the camera pushes slowly
--- toward the stage while the organizer's lines play as captions, then the bars
--- "shrink out" and control returns. The player is seated in the auditorium.
+-- OPENING CUTSCENE (Day 1 start, the organizer's welcome talk)
+-- Shot list and staging live in Shared.OpeningCinematic.
 -- ============================================================
 local function playOpeningCutscene(data: { [string]: any })
-    local lines = (data.lines :: { string }?) or { "Welcome to the hackathon." }
-    local camStart = (data.camStart :: Vector3?) or Vector3.new(-52, 9, -22)
-    local camEnd = (data.camEnd :: Vector3?) or Vector3.new(-46, 6, -42)
-    local lookAt = (data.lookAt :: Vector3?) or Vector3.new(-64, 4, -75)
-    local seatNear = data.seatNear :: Vector3?
-
-    disableControls()
-
-    -- hide every other on-screen UI for a clean cinematic frame
-    local hiddenGuis: { ScreenGui } = {}
-    for _, g in playerGui:GetChildren() do
-        if g:IsA("ScreenGui") and g.Enabled then
-            g.Enabled = false
-            table.insert(hiddenGuis, g)
-        end
-    end
-
-    local char = player.Character
-    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-
-    -- seat the player in the auditorium. We DON'T use the bench's Seat:Sit — that
-    -- creates a SeatWeld which drags the whole bench along when the cutscene later
-    -- teleports the player out. Just sit them in place on the bench's spot.
-    if hrp and hrp:IsA("BasePart") and seatNear then
-        hrp.CFrame = CFrame.new(seatNear)
-        task.wait(0.1)
-        if humanoid then
-            humanoid.Sit = true
-            hrp.Anchored = true
-        end
-    end
-
-    -- cinematic camera (slow dolly toward the stage)
-    camera.CameraType = Enum.CameraType.Scriptable
-    camera.CFrame = CFrame.lookAt(camStart, lookAt)
-    TweenService:Create(camera, TweenInfo.new(8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-        CFrame = CFrame.lookAt(camEnd, lookAt),
-    }):Play()
-
-    -- letterbox + caption overlay
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "OpeningCinematic"
-    gui.IgnoreGuiInset = true
-    gui.DisplayOrder = 400
-    gui.Parent = playerGui
-
-    local topBar = Instance.new("Frame")
-    topBar.BackgroundColor3 = Color3.new(0, 0, 0)
-    topBar.BorderSizePixel = 0
-    topBar.Position = UDim2.new(0, 0, 0, 0)
-    topBar.Size = UDim2.new(1, 0, 0, 0)
-    topBar.Parent = gui
-
-    local botBar = Instance.new("Frame")
-    botBar.BackgroundColor3 = Color3.new(0, 0, 0)
-    botBar.BorderSizePixel = 0
-    botBar.AnchorPoint = Vector2.new(0, 1)
-    botBar.Position = UDim2.new(0, 0, 1, 0)
-    botBar.Size = UDim2.new(1, 0, 0, 0)
-    botBar.Parent = gui
-
-    local caption = Instance.new("TextLabel")
-    -- Anchored just above the bottom letterbox bar and tall enough to hold a few
-    -- wrapped lines, so long sentences show in full instead of being clipped.
-    caption.AnchorPoint = Vector2.new(0.5, 1)
-    caption.Size = UDim2.new(0.82, 0, 0, 120)
-    caption.Position = UDim2.new(0.5, 0, 0.86, 0)
-    caption.BackgroundTransparency = 1
-    caption.Font = Enum.Font.GothamMedium
-    caption.TextSize = 24
-    caption.TextColor3 = Color3.fromRGB(245, 245, 245)
-    caption.TextStrokeTransparency = 0.5
-    caption.TextWrapped = true
-    caption.TextYAlignment = Enum.TextYAlignment.Bottom
-    caption.TextTransparency = 1
-    caption.Text = ""
-    caption.Parent = gui
-
-    local BAR_H = 0.12
-    -- bars slide IN
-    TweenService:Create(topBar, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
-    TweenService:Create(botBar, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
-
-    -- Each caption is held for a fixed, readable beat (so the speech can be a
-    -- proper new-player guide — the more lines it has, the longer it runs).
-    local PER_LINE = 3.4
-    task.spawn(function()
-        task.wait(0.5)
-        for _, ln in lines do
-            caption.Text = ln
-            TweenService:Create(caption, TweenInfo.new(0.3), { TextTransparency = 0 }):Play()
-            task.wait(math.max(0.3, PER_LINE - 0.35))
-            TweenService:Create(caption, TweenInfo.new(0.25), { TextTransparency = 1 }):Play()
-            task.wait(0.05)
-        end
-    end)
-
-    -- hold the letterbox until every caption has played out
-    task.wait(0.5 + #lines * (PER_LINE - 0.3) + 0.6)
-
-    -- bars "shrink out"
-    TweenService:Create(topBar, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = UDim2.new(1, 0, 0, 0) }):Play()
-    TweenService:Create(botBar, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = UDim2.new(1, 0, 0, 0) }):Play()
-    task.wait(0.5)
-    gui:Destroy()
-
-    -- restore gameplay — get the player up off the bench Seat and onto their feet.
-    -- (Sit=false alone leaves them welded to the Seat, which would freeze them and
-    -- desync their position; Jump pops the SeatWeld, then we step them to the exit.)
-    if humanoid then
-        humanoid.Sit = false
-        humanoid.Jump = true
-    end
-    if hrp and hrp:IsA("BasePart") then
-        hrp.Anchored = false
-        local exitTo = data.exitTo :: Vector3?
-        if exitTo then
-            task.wait(0.1)
-            hrp.CFrame = CFrame.new(exitTo)
-        end
-    end
-    camera.CameraType = Enum.CameraType.Custom
-    if humanoid then
-        camera.CameraSubject = humanoid
-    end
-    -- bring the hidden UIs back (but never the lobby menu — it's dismissed for the
-    -- rest of the match, and re-enabling it would revive its pulsing overlay)
-    for _, g in hiddenGuis do
-        if g.Parent and g.Name ~= "LobbyGui" then
-            g.Enabled = true
-        end
-    end
-    enableControls()
+    OpeningCinematic.play(data, {
+        playerGui = playerGui :: PlayerGui,
+        disableControls = disableControls,
+        enableControls = enableControls,
+        resetLens = resetLens,
+        getCutsceneBlur = getCutsceneBlur,
+        motionBlur = motionBlur,
+    })
 end
 
 -- ============================================================
@@ -682,12 +685,12 @@ local function playNightTransition()
     botBar.Position = UDim2.new(0,0,1,0); botBar.Size = UDim2.new(1,0,0,0); botBar.ZIndex = 5; botBar.Parent = gui
     local caption = Instance.new("TextLabel")
     caption.AnchorPoint = Vector2.new(0.5,1); caption.Size = UDim2.new(0.82,0,0,120); caption.Position = UDim2.new(0.5,0,0.88,0)
-    caption.BackgroundTransparency = 1; caption.Font = Enum.Font.GothamMedium; caption.TextSize = 24
+    caption.BackgroundTransparency = 1; caption.FontFace = UITheme.Font.Medium; caption.TextSize = 24
     caption.TextColor3 = Color3.fromRGB(245,245,245); caption.TextStrokeTransparency = 0.5; caption.TextWrapped = true
     caption.TextYAlignment = Enum.TextYAlignment.Bottom; caption.TextTransparency = 1; caption.ZIndex = 10; caption.Text = ""; caption.Parent = gui
     local thought = Instance.new("TextLabel")
     thought.AnchorPoint = Vector2.new(0.5,0.5); thought.Size = UDim2.new(0.72,0,0,140); thought.Position = UDim2.new(0.5,0,0.5,0)
-    thought.BackgroundTransparency = 1; thought.Font = Enum.Font.Gotham; thought.TextSize = 26
+    thought.BackgroundTransparency = 1; thought.FontFace = UITheme.Font.Regular; thought.TextSize = 26
     thought.TextColor3 = Color3.fromRGB(205,205,220); thought.TextStrokeTransparency = 0.6; thought.TextWrapped = true
     thought.TextTransparency = 1; thought.ZIndex = 10; thought.Text = ""; thought.Parent = gui
     local flash = Instance.new("Frame")
@@ -737,7 +740,6 @@ local function playNightTransition()
 
     local BASE = Vector3.new(8000, 400, 8000)
     local DARK = Color3.fromRGB(14, 13, 18)
-    local NGMI_BODY = Color3.fromRGB(40, 10, 50)
     local set = Instance.new("Folder"); set.Name = "NightTransitionSet"; set.Parent = workspace
 
     local function newPart(name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
@@ -747,257 +749,89 @@ local function playNightTransition()
         return p
     end
 
-    local cloneSources: { Model } = {}
-    local function gatherFrom(folderName: string)
-        local f = workspace:FindFirstChild(folderName)
-        if not f then return end
-        for _, m in f:GetChildren() do
-            if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") and m:FindFirstChild("HumanoidRootPart") and m:FindFirstChild("UpperTorso") then
-                table.insert(cloneSources, m)
-            end
-        end
-    end
-    gatherFrom("NPCs")
-    if #cloneSources == 0 then gatherFrom("AmbientPeople") end
-
-    -- The joint name (e.g. "RightShoulder") may be shared by both a Motor6D AND an
-    -- AnimationConstraint on modern rigs, so search for the Motor6D specifically.
-    local function motorOf(model: Model, partName: string, motorName: string): Motor6D?
-        local part = model:FindFirstChild(partName)
-        if not part then return nil end
-        for _, c in part:GetChildren() do
-            if c:IsA("Motor6D") and c.Name == motorName then return c :: Motor6D end
-        end
-        return nil
-    end
-    local JOINTS: { [string]: { string } } = {
-        waist = { "UpperTorso", "Waist" }, neck = { "Head", "Neck" },
-        rS = { "RightUpperArm", "RightShoulder" }, lS = { "LeftUpperArm", "LeftShoulder" },
-        rE = { "RightLowerArm", "RightElbow" }, lE = { "LeftLowerArm", "LeftElbow" },
-        rH = { "RightUpperLeg", "RightHip" }, lH = { "LeftUpperLeg", "LeftHip" },
-        rK = { "RightLowerLeg", "RightKnee" }, lK = { "LeftLowerLeg", "LeftKnee" },
-    }
-
-    local function makeActor(cf: CFrame, role: string): any
-        local model: Model
-        if #cloneSources > 0 then
-            model = cloneSources[math.random(#cloneSources)]:Clone()
-        else
-            model = Instance.new("Model")
-            local r = newPart("HumanoidRootPart", Vector3.new(2,2,1), cf, Color3.fromRGB(60,60,70))
-            r.Transparency = 1; r.Parent = model
-            newPart("UpperTorso", Vector3.new(2,2,1), cf * CFrame.new(0,0.1,0), Color3.fromRGB(40,90,170)).Parent = model
-            newPart("Head", Vector3.new(1.2,1.2,1.2), cf * CFrame.new(0,1.6,0), Color3.fromRGB(224,188,158)).Parent = model
-            model.PrimaryPart = r
-            Instance.new("Humanoid").Parent = model
-        end
-        for _, d in model:GetDescendants() do
-            if d:IsA("LuaSourceContainer") or d:IsA("ProximityPrompt") or d:IsA("BillboardGui") or d:IsA("Sound") or d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic") then
-                d:Destroy()
-            elseif d:IsA("BasePart") then
-                d.Anchored = false; d.CanCollide = false; d.CanQuery = false; d.CastShadow = false; d.Massless = true
-            end
-        end
-        local HOODIE = { Color3.fromRGB(40,80,150), Color3.fromRGB(45,120,75), Color3.fromRGB(120,55,140), Color3.fromRGB(165,90,45), Color3.fromRGB(55,105,120), Color3.fromRGB(95,95,110) }
-        local SKIN = { Color3.fromRGB(235,200,170), Color3.fromRGB(205,165,125), Color3.fromRGB(160,115,85) }
-        local hoodie = HOODIE[math.random(#HOODIE)]
-        local skin = SKIN[math.random(#SKIN)]
-        local pants = Color3.fromRGB(45,48,58)
-        local function paint(names: { string }, col: Color3)
-            for _, n in names do local pt = model:FindFirstChild(n); if pt and pt:IsA("BasePart") then pt.Color = col; pt.Material = Enum.Material.SmoothPlastic end end
-        end
-        paint({ "UpperTorso","LowerTorso","LeftUpperArm","LeftLowerArm","RightUpperArm","RightLowerArm" }, hoodie)
-        paint({ "Head","LeftHand","RightHand" }, skin)
-        paint({ "LeftUpperLeg","LeftLowerLeg","LeftFoot","RightUpperLeg","RightLowerLeg","RightFoot" }, pants)
-
-        -- CreateHumanoidModelFromDescription rigs carry RigAttachments but no
-        -- Motor6Ds; clones never get assembled, so build the R15 joints ourselves.
-        if not model:FindFirstChildWhichIsA("Motor6D", true) then
-            local JOINT_DEFS = {
-                { "Root","HumanoidRootPart","LowerTorso","RootRigAttachment" },
-                { "Waist","LowerTorso","UpperTorso","WaistRigAttachment" },
-                { "Neck","UpperTorso","Head","NeckRigAttachment" },
-                { "RightShoulder","UpperTorso","RightUpperArm","RightShoulderRigAttachment" },
-                { "RightElbow","RightUpperArm","RightLowerArm","RightElbowRigAttachment" },
-                { "RightWrist","RightLowerArm","RightHand","RightWristRigAttachment" },
-                { "LeftShoulder","UpperTorso","LeftUpperArm","LeftShoulderRigAttachment" },
-                { "LeftElbow","LeftUpperArm","LeftLowerArm","LeftElbowRigAttachment" },
-                { "LeftWrist","LeftLowerArm","LeftHand","LeftWristRigAttachment" },
-                { "RightHip","LowerTorso","RightUpperLeg","RightHipRigAttachment" },
-                { "RightKnee","RightUpperLeg","RightLowerLeg","RightKneeRigAttachment" },
-                { "RightAnkle","RightLowerLeg","RightFoot","RightAnkleRigAttachment" },
-                { "LeftHip","LowerTorso","LeftUpperLeg","LeftHipRigAttachment" },
-                { "LeftKnee","LeftUpperLeg","LeftLowerLeg","LeftKneeRigAttachment" },
-                { "LeftAnkle","LeftLowerLeg","LeftFoot","LeftAnkleRigAttachment" },
-            }
-            for _, j in JOINT_DEFS do
-                local p0 = model:FindFirstChild(j[2]); local p1 = model:FindFirstChild(j[3])
-                local a0 = p0 and p0:FindFirstChild(j[4]); local a1 = p1 and p1:FindFirstChild(j[4])
-                if p0 and p1 and a0 and a1 then
-                    local mt = Instance.new("Motor6D")
-                    mt.Name = j[1]; mt.Part0 = p0; mt.Part1 = p1; mt.C0 = a0.CFrame; mt.C1 = a1.CFrame; mt.Parent = p1
-                end
-            end
-        end
-
-        local hum = model:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-            hum.AutoRotate = false
-            hum.BreakJointsOnDeath = false
-        end
-        model.Name = "Actor"
-        model:PivotTo(cf)
-        local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
-        if root then root.Anchored = true end
-        model.Parent = set
-
-        local actor: any = {
-            model = model, root = root, head = model:FindFirstChild("Head"),
-            facing = cf.LookVector, right = cf.RightVector, role = role,
-            phase = math.random() * 6.283, J = {}, base = {},
-        }
-        for key, names in JOINTS do
-            local mt = motorOf(model, names[1], names[2])
-            if mt then actor.J[key] = mt; actor.base[key] = mt.C0 end
-        end
-        local function bend(key: string, ang: CFrame)
-            local mt = actor.J[key]
-            if mt then mt.C0 = actor.base[key] * ang end
-        end
-        actor.bend = bend
-        function actor.setPivot(p: CFrame)
-            actor.model:PivotTo(p)
-            if root then root.Anchored = true end
-            actor.facing = p.LookVector; actor.right = p.RightVector
-            actor.head = actor.model:FindFirstChild("Head")
-        end
-
-        if role == "slam" or role == "headshake" then
-            bend("rH", CFrame.Angles(math.rad(-80),0,0)); bend("lH", CFrame.Angles(math.rad(-80),0,0))
-            bend("rK", CFrame.Angles(math.rad(86),0,0)); bend("lK", CFrame.Angles(math.rad(86),0,0))
-        end
-        if role == "slam" then
-            -- hunched at the keyboard, repeatedly slamming both fists on the desk
-            bend("waist", CFrame.Angles(math.rad(16),0,0))
-            bend("rE", CFrame.Angles(math.rad(-42),0,0)); bend("lE", CFrame.Angles(math.rad(-42),0,0))
-            actor.update = function(t)
-                local down = math.sin(t*5 + actor.phase) > 0.5
-                local s = down and 80 or 32
-                bend("rS", CFrame.Angles(math.rad(s),0,math.rad(-6))); bend("lS", CFrame.Angles(math.rad(s),0,math.rad(6)))
-                bend("neck", CFrame.Angles(math.rad(down and 30 or 10),0,0))
-                bend("waist", CFrame.Angles(math.rad(down and 26 or 14),0,0))
-            end
-        elseif role == "headshake" then
-            -- face buried in hands, shaking their head "no, no, no"
-            bend("waist", CFrame.Angles(math.rad(30),0,0))
-            bend("rS", CFrame.Angles(math.rad(116),0,math.rad(-14))); bend("lS", CFrame.Angles(math.rad(116),0,math.rad(14)))
-            bend("rE", CFrame.Angles(math.rad(-104),0,0)); bend("lE", CFrame.Angles(math.rad(-104),0,0))
-            actor.update = function(t)
-                local shake = math.sin(t*9 + actor.phase)
-                bend("neck", CFrame.Angles(math.rad(22), math.rad(22)*shake, math.rad(7)*shake))
-                bend("waist", CFrame.Angles(math.rad(30)+math.rad(3)*math.sin(t*4), math.rad(4)*shake, 0))
-            end
-        elseif role == "hair" then
-            -- both hands clutching and yanking at their hair, head thrashing
-            bend("rE", CFrame.Angles(math.rad(-108),0,0)); bend("lE", CFrame.Angles(math.rad(-108),0,0))
-            actor.update = function(t)
-                local yank = math.sin(t*7 + actor.phase)
-                local jit = math.sin(t*23 + actor.phase) * math.rad(6)
-                local s = math.rad(112) + math.rad(12)*yank + jit
-                bend("rS", CFrame.Angles(s,0,math.rad(-28))); bend("lS", CFrame.Angles(s,0,math.rad(28)))
-                bend("neck", CFrame.Angles(math.rad(-4)+math.rad(10)*yank, math.rad(11)*math.sin(t*5), 0))
-                bend("waist", CFrame.Angles(math.rad(7)*math.abs(yank),0,0))
-            end
-        elseif role == "pace" then
-            bend("rS", CFrame.Angles(math.rad(150),0,math.rad(-18))); bend("lS", CFrame.Angles(math.rad(150),0,math.rad(18)))
-            bend("rE", CFrame.Angles(math.rad(-106),0,0)); bend("lE", CFrame.Angles(math.rad(-106),0,0))
-            bend("waist", CFrame.Angles(math.rad(12),0,0))
-            actor.update = function(t)
-                if actor.a and actor.b then
-                    local u = math.sin(t*actor.speed)*0.5+0.5
-                    local pos = (actor.a :: Vector3):Lerp(actor.b :: Vector3, u)
-                    local dir = (actor.b :: Vector3) - (actor.a :: Vector3)
-                    local f = (math.cos(t*actor.speed) >= 0) and dir or -dir
-                    f = Vector3.new(f.X,0,f.Z); if f.Magnitude < 0.01 then f = Vector3.new(0,0,1) end
-                    local bobY = math.abs(math.sin(t*actor.speed*6))*0.18
-                    local p = pos + Vector3.new(0,bobY,0)
-                    actor.setPivot(CFrame.lookAt(p, p + f.Unit))
-                end
-                local sw = math.rad(30)*math.sin(t*(actor.speed or 1)*6 + actor.phase)
-                bend("rH", CFrame.Angles(sw,0,0)); bend("lH", CFrame.Angles(-sw,0,0))
-                bend("neck", CFrame.Angles(0, math.rad(10)*math.sin(t*3 + actor.phase), 0))
-            end
-        end
+    -- Performers are clones of real venue rigs (Shared.CutsceneActors); the
+    -- breakdowns, the turns and the exit shamble are in Shared.NGMIChoreo, and
+    -- the mutation itself is Shared.NGMIMutation, the same one the gameplay
+    -- NGMIs are built with.
+    local sources = CutsceneActors.gatherSources({ "NPCs", "AmbientPeople" })
+    local function makeActor(cf: CFrame, role: string, seated: boolean): any
+        local actor: any = CutsceneActors.spawn({
+            source = if #sources > 0 then sources[math.random(#sources)] else nil,
+            parent = set,
+            cframe = cf,
+            repaint = true,
+            stripClothes = true,
+        })
+        if not actor then return nil end
+        actor.role = role
+        actor.seated = seated
+        actor.mode = "breakdown"
+        actor.modeStart = 0
+        actor.twist = 0
         return actor
     end
 
-    local function ngmify(actor: any)
-        for _, d in actor.model:GetDescendants() do
-            if d:IsA("BasePart") then d.Color = NGMI_BODY; d.Material = Enum.Material.SmoothPlastic
-            elseif d:IsA("Decal") or d:IsA("Texture") or d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic") then d:Destroy() end
-        end
-        local head = actor.model:FindFirstChild("Head") :: BasePart?
-        if head then
-            for _, sx in { -0.3, 0.3 } do
-                local eye = Instance.new("Part")
-                eye.Name = "Eye"; eye.Shape = Enum.PartType.Ball; eye.Size = Vector3.new(0.26,0.26,0.26)
-                eye.Anchored = false; eye.CanCollide = false; eye.CanQuery = false; eye.Massless = true; eye.CastShadow = false
-                eye.Color = Color3.fromRGB(255,0,0); eye.Material = Enum.Material.Neon
-                eye.CFrame = head.CFrame * CFrame.new(sx, 0.12, -0.62); eye.Parent = actor.model
-                local w = Instance.new("WeldConstraint"); w.Part0 = head; w.Part1 = eye; w.Parent = eye
-            end
-            local glow = Instance.new("PointLight"); glow.Color = Color3.fromRGB(255,0,0); glow.Brightness = 3; glow.Range = 9; glow.Parent = head
-        end
-        local torso = actor.model:FindFirstChild("UpperTorso") or actor.model:FindFirstChild("Torso")
-        if torso and torso:IsA("BasePart") then
-            local emit = Instance.new("ParticleEmitter")
-            emit.Color = ColorSequence.new(Color3.fromRGB(80,20,120), Color3.fromRGB(20,0,30))
-            emit.Size = NumberSequence.new(0.3,1.2); emit.Transparency = NumberSequence.new(0.4,1)
-            emit.Lifetime = NumberRange.new(1.2,2.4); emit.Rate = 14; emit.Speed = NumberRange.new(0.5,2)
-            emit.SpreadAngle = Vector2.new(180,180); emit.Parent = torso
+    -- Root height for a standing rig: hips sit HipHeight above the floor and
+    -- the root's centre half its height above that.
+    local standLift = 3.6
+    do
+        local src = sources[1]
+        local hum = src and src:FindFirstChildOfClass("Humanoid")
+        local root = src and src:FindFirstChild("HumanoidRootPart")
+        if hum and root and root:IsA("BasePart") and hum.HipHeight > 0 then
+            standLift = hum.HipHeight + root.Size.Y * 0.5
         end
     end
 
     local function addDesk(actorPos: Vector3, code: string)
-        newPart("Desk", Vector3.new(4.4,0.2,2), CFrame.new(actorPos + Vector3.new(0,-0.7,1.7)), Color3.fromRGB(58,53,62))
+        newPart("Desk", Vector3.new(4.4,0.2,2), CFrame.new(actorPos + Vector3.new(0,-0.25,1.7)), Color3.fromRGB(58,53,62))
         local screenPos = actorPos + Vector3.new(0,0.5,2.5)
         local screen = newPart("Screen", Vector3.new(2.6,1.6,0.1), CFrame.lookAt(screenPos, actorPos + Vector3.new(0,0.4,0)), Color3.fromRGB(16,12,16), Enum.Material.Neon)
         local sg = Instance.new("SurfaceGui"); sg.Face = Enum.NormalId.Front; sg.CanvasSize = Vector2.new(320,200); sg.Parent = screen
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundColor3 = Color3.fromRGB(10,6,9); lbl.Font = Enum.Font.Code
+        lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundColor3 = Color3.fromRGB(10,6,9); lbl.FontFace = UITheme.Font.Mono
         lbl.TextColor3 = Color3.fromRGB(255,70,70); lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextYAlignment = Enum.TextYAlignment.Top
         lbl.TextWrapped = true; lbl.TextSize = 15; lbl.Text = code; lbl.Parent = sg
-        local face = Instance.new("PointLight"); face.Color = Color3.fromRGB(255,120,110); face.Brightness = 0.7; face.Range = 12; face.Parent = screen
+        -- In a dark room the monitor is the key light on the actor's face, so it
+        -- carries more than it did when the room was flat-lit.
+        local face = Instance.new("PointLight"); face.Color = Color3.fromRGB(255,120,110); face.Brightness = 1; face.Range = 10; face.Parent = screen
     end
 
     local function headOf(rig: any): BasePart?
-        local h = rig.head
-        if h and h:IsA("BasePart") then return h end
-        h = rig.model and rig.model:FindFirstChild("Head")
-        if h and h:IsA("BasePart") then rig.head = h; return h end
-        return nil
+        if not rig then return nil end
+        return rig.head()
+    end
+    -- A hard cut with a blur snap over it. Punching the blur up on the frame of
+    -- the cut and decaying it away is what makes an instant CFrame change read as
+    -- an edit rather than a teleport, and it tightens the lens for the close-up so
+    -- the face is shot long instead of wide.
+    local function snapCut(fov: number)
+        local snap = getCutsceneBlur()
+        snap.Size = 14
+        motionBlur(0, 0.28)
+        fovPull(fov, 0.35, Enum.EasingDirection.Out)
     end
     local function cutToFace(rig: any, sideways: number, dist: number)
+        if not rig then return end
         local head = headOf(rig)
         local headPos = head and head.Position or (rig.model:GetPivot().Position + Vector3.new(0, 2.2, 0))
         local target = headPos - Vector3.new(0,0.5,0)
         local pos = headPos + rig.facing*dist + rig.right*sideways + Vector3.new(0,0.7,0)
         camera.CFrame = CFrame.lookAt(pos, target)
+        snapCut(48)
+    end
+    --- Cut to a camera placed in the actor's own space (-Z is in front of
+    --- them), aimed at a point also given in their space.
+    local function cutToLocal(rig: any, camLocal: Vector3, lookLocal: Vector3, fov: number)
+        if not rig then return end
+        local pivot = rig.model:GetPivot()
+        camera.CFrame = CFrame.lookAt(pivot:PointToWorldSpace(camLocal), pivot:PointToWorldSpace(lookLocal))
+        snapCut(fov)
     end
     local function startCamShake(intensity: number): RBXScriptConnection
         local baseCF = camera.CFrame
         return RunService.RenderStepped:Connect(function()
             camera.CFrame = baseCF * CFrame.Angles(math.rad((math.random()-0.5)*intensity), math.rad((math.random()-0.5)*intensity), math.rad((math.random()-0.5)*intensity))
-        end)
-    end
-    local function startSpaz(actor: any, intensity: number): RBXScriptConnection
-        actor.update = nil
-        return RunService.Heartbeat:Connect(function()
-            for key, baseC0 in actor.base do
-                local mt = actor.J[key]
-                if mt then mt.C0 = baseC0 * CFrame.Angles(math.rad((math.random()-0.5)*intensity), math.rad((math.random()-0.5)*intensity), math.rad((math.random()-0.5)*intensity)) end
-            end
         end)
     end
 
@@ -1009,8 +843,9 @@ local function playNightTransition()
     local CEIL = Color3.fromRGB(232, 232, 236)
     local centerX = BASE.X
     local floorTop = BASE.Y + 0.2
-    local standY = floorTop + 2.9
-    local seatY = floorTop + 2.4
+    local standY = floorTop + standLift
+    -- Thighs land ~1.4 studs off the floor, just under the desk tops.
+    local seatY = floorTop + 2.85
     local backZ = BASE.Z - 20
     local frontZ = BASE.Z + 20
     local wallY = BASE.Y + 6
@@ -1025,33 +860,156 @@ local function playNightTransition()
     newPart("Window", Vector3.new(0.3, 5, 8), CFrame.new(centerX + 24.7, BASE.Y + 6, BASE.Z + 6), Color3.fromRGB(28, 33, 48), Enum.Material.Glass)
     local skyLight = newPart("Sky", Vector3.new(0.2, 5, 8), CFrame.new(centerX + 25.6, BASE.Y + 6, BASE.Z + 6), Color3.fromRGB(20, 25, 40), Enum.Material.Neon)
     skyLight.Transparency = 1
-    local skyPL = Instance.new("PointLight"); skyPL.Color = Color3.fromRGB(150,170,255); skyPL.Brightness = 0; skyPL.Range = 34; skyPL.Parent = skyLight
+    -- Cold night sky through the window. It used to sit at zero until the
+    -- lightning hit, so the window was a black rectangle; a low steady value
+    -- gives the room a cold edge to sit against the tubes.
+    --
+    -- Range 14, NOT the 34 it had: the room is only 50 x 40, so a 34-stud light
+    -- at the window is not a rim on the glass, it is a second room light washing
+    -- everything. That single number was why every close-up rendered as a white
+    -- wall while the wides still looked like a blackout.
+    local skyPL = Instance.new("PointLight"); skyPL.Color = Color3.fromRGB(150,170,255); skyPL.Brightness = 0.6; skyPL.Range = 14; skyPL.Parent = skyLight
+    -- Overhead tubes. Half of them are dead and the rest are tired: a venue at
+    -- 3am is not evenly lit, it is a few pools of light with dark between them.
+    -- One fixture flickers, which is the cheapest "this place is wrong" signal
+    -- there is and it gives the room some motion before anything happens.
+    local flickerFixtures: { Part } = {}
     for _, cx in { -14, 0, 14 } do
         for _, cz in { -8, 8 } do
-            local fix = newPart("CeilLight", Vector3.new(4, 0.3, 2), CFrame.new(centerX + cx, BASE.Y + 11.6, BASE.Z + cz), Color3.fromRGB(255, 245, 225), Enum.Material.Neon)
-            local pl = Instance.new("PointLight"); pl.Color = Color3.fromRGB(255, 240, 215); pl.Brightness = 1.6; pl.Range = 26; pl.Parent = fix
+            local dead = (cx == 14 and cz == -8) or (cx == -14 and cz == 8)
+            local fix = newPart("CeilLight", Vector3.new(4, 0.3, 2), CFrame.new(centerX + cx, BASE.Y + 11.6, BASE.Z + cz), Color3.fromRGB(190, 196, 214), Enum.Material.Neon)
+            if dead then
+                fix.Color = Color3.fromRGB(38, 40, 48)
+                fix.Material = Enum.Material.SmoothPlastic
+            else
+                local pl = Instance.new("PointLight")
+                pl.Color = Color3.fromRGB(214, 222, 240) -- fluorescent, not warm lamplight
+                -- Modest on purpose. Ambient already puts the room at a dim night
+                -- level; these are pools on top of it, not the room light. At 1.6
+                -- a single fixture lit a wall eight studs away to near-white, and
+                -- every close-up shot near a desk blew out.
+                pl.Brightness = 1.1
+                pl.Range = 28
+                pl.Parent = fix
+                if cx == 0 and cz == -8 then
+                    table.insert(flickerFixtures, fix)
+                end
+            end
         end
     end
+    table.insert(conns, RunService.Heartbeat:Connect(function()
+        local t = os.clock()
+        for _, fix in flickerFixtures do
+            local pl = fix:FindFirstChildOfClass("PointLight")
+            if pl then
+                -- mostly on, with irregular dropouts
+                local n = math.sin(t * 37) * math.sin(t * 11.3) * math.sin(t * 3.1)
+                local out = n < -0.55
+                pl.Brightness = out and 0.08 or 1.1
+                fix.Color = out and Color3.fromRGB(60, 63, 74) or Color3.fromRGB(190, 196, 214)
+            end
+        end
+    end))
 
+    -- A key light riding the lens. The two desk actors are lit by their monitors,
+    -- but the standing ones (the rager, and the victim who carries the climax)
+    -- have nothing in front of them, so every close-up of them was a black
+    -- silhouette once the room went dark. Short range on purpose: it reaches a
+    -- face at close-up distance and dies well before it can lift the wides.
+    local keyPart = newPart("KeyLight", Vector3.new(0.2, 0.2, 0.2), CFrame.new(BASE), Color3.new(0,0,0))
+    keyPart.Transparency = 1
+    local keyLight = Instance.new("PointLight")
+    keyLight.Color = Color3.fromRGB(198, 208, 235)
+    -- Calibrated against a stand-in head at the close-up distance the shots use
+    -- (3.2 studs): 1.5/15 blew the room out to daylight, 0.35/9 left the face a
+    -- silhouette. This reads the face and dies before it reaches the walls.
+    keyLight.Brightness = 0.12
+    keyLight.Range = 6
+    keyLight.Parent = keyPart
+    table.insert(conns, RunService.RenderStepped:Connect(function()
+        keyPart.CFrame = camera.CFrame * CFrame.new(1.2, 1, 1)
+    end))
+
+    -- One role per actor, never reused, and each role has its own turn in
+    -- NGMIChoreo.TURN. If you add an actor, give it its own role and turn.
     local cast: { any } = {}
     local function facing(pos: Vector3): CFrame return CFrame.lookAt(pos, pos + Vector3.new(0,0,1)) end
+    local function cue(a: any) if a then table.insert(cast, a) end return a end
     local slamPos = Vector3.new(centerX - 12, seatY, BASE.Z - 3)
-    local slammer = makeActor(facing(slamPos), "slam")
+    local slammer = cue(makeActor(facing(slamPos), "slam", true))
     addDesk(slamPos, "$ make\nundefined reference\nundefined reference\n  187 errors\nbuild FAILED")
     local shakePos = Vector3.new(centerX - 3, seatY, BASE.Z - 4)
-    local shaker = makeActor(facing(shakePos), "headshake")
+    local shaker = cue(makeActor(facing(shakePos), "headshake", true))
     addDesk(shakePos, "Traceback (most recent call last)\n  File main.py, line 42\nSyntaxError: invalid syntax\nSyntaxError")
-    local rager = makeActor(facing(Vector3.new(centerX + 7, standY, BASE.Z - 2)), "hair")
-    local pacer = makeActor(facing(Vector3.new(centerX + 15, standY, BASE.Z - 3)), "pace")
-    pacer.a = Vector3.new(centerX + 12, standY, BASE.Z - 7); pacer.b = Vector3.new(centerX + 18, standY, BASE.Z + 3); pacer.speed = 0.9
-    local victim = makeActor(facing(Vector3.new(centerX, standY, BASE.Z + 5)), "hair")
-    table.insert(cast, slammer); table.insert(cast, shaker); table.insert(cast, rager); table.insert(cast, pacer); table.insert(cast, victim)
+    local rager = cue(makeActor(facing(Vector3.new(centerX + 7, standY, BASE.Z - 2)), "hair", false))
+    local pacer = cue(makeActor(facing(Vector3.new(centerX + 15, standY, BASE.Z - 3)), "pace", false))
+    if pacer then
+        pacer.a = Vector3.new(centerX + 12, standY, BASE.Z - 7); pacer.b = Vector3.new(centerX + 18, standY, BASE.Z + 3); pacer.speed = 0.9
+    end
+    local deskPos = Vector3.new(centerX - 20, seatY, BASE.Z - 2)
+    local facedesker = cue(makeActor(facing(deskPos), "facedesk", true))
+    addDesk(deskPos, "git push --force\n! [rejected] main -> main\nmerge conflict in 14 files\nmerge conflict in 14 files")
+    local starePos = Vector3.new(centerX + 20, seatY, BASE.Z + 3)
+    local starer = cue(makeActor(facing(starePos), "stare", true))
+    addDesk(starePos, "npm ERR! code ELIFECYCLE\nnpm ERR! errno 1\n\n> build failed\n> 04:11:58")
+    local victim = cue(makeActor(facing(Vector3.new(centerX, standY, BASE.Z + 5)), "unravel", false))
 
+    -- One loop poses the whole cast. Each actor is in a mode: its breakdown
+    -- loop, its one-shot turn (mutating partway through), the turned idle, or
+    -- the exit walk (posed by the walk loop below).
     local animClock = os.clock()
-    table.insert(conns, RunService.Heartbeat:Connect(function()
+    local onMutate: (any) -> () = function(_a: any) end
+    local function poseActor(a: any, t: number, dt: number)
+        local pose: RigPose.Pose
+        if a.mode == "breakdown" then
+            local stride: number? = nil
+            if a.role == "pace" and a.a and a.b then
+                local u = math.sin(t*a.speed)*0.5+0.5
+                local pos = (a.a :: Vector3):Lerp(a.b :: Vector3, u)
+                local dir = (a.b :: Vector3) - (a.a :: Vector3)
+                local f = if math.cos(t*a.speed) >= 0 then dir else -dir
+                f = Vector3.new(f.X,0,f.Z); if f.Magnitude < 0.01 then f = Vector3.new(0,0,1) end
+                a.setPivot(CFrame.lookAt(pos, pos + f.Unit))
+                stride = t*a.speed*6
+            end
+            pose = NGMIChoreo.BREAKDOWN[a.role](t, a, stride)
+        elseif a.mode == "turn" then
+            local turn = NGMIChoreo.TURN[a.role]
+            local lt = t - a.modeStart
+            if not a.mutated and lt >= turn.mutateAt then
+                a.mutated = true
+                NGMIMutation.apply(a.model, math.floor(a.phase * 100000) + 7, { fx = true })
+                onMutate(a)
+            end
+            pose = turn.fn(math.min(lt, turn.length), a)
+            if lt >= turn.length then a.mode = "idle" end
+        elseif a.mode == "idle" then
+            pose = NGMIChoreo.idle(t, a)
+        else
+            pose = a.walkPose or {}
+        end
+        if a.mutated then a.twist = math.min(1, a.twist + dt / 0.6) end
+        if a.twist > 0 then pose = RigPose.add(pose, NGMIMutation.TWIST, a.twist) end
+        a.rig:apply(pose, dt, 20)
+    end
+    table.insert(conns, RunService.Heartbeat:Connect(function(dt: number)
         local t = os.clock() - animClock
-        for _, a in cast do if a.update then pcall(a.update, t) end end
+        for _, a in cast do
+            if a.mode ~= "frozen" then
+                local ok, err = pcall(poseActor, a, t, dt)
+                if not ok then
+                    warn("[CutsceneManager] actor pose failed: " .. tostring(err))
+                    a.mode = "frozen"
+                end
+            end
+        end
     end))
+    local function startTurn(a: any)
+        if a and a.mode ~= "turn" then
+            a.mode = "turn"
+            a.modeStart = os.clock() - animClock
+        end
+    end
 
     -- a short hallway through the back doorway, for the exit shot
     newPart("HallFloor", Vector3.new(10, 0.4, 30), CFrame.new(centerX, floorTop - 0.2, backZ - 15), Color3.fromRGB(120, 124, 130), Enum.Material.Concrete)
@@ -1060,7 +1018,7 @@ local function playNightTransition()
     newPart("HallWallR", Vector3.new(0.6, 10, 30), CFrame.new(centerX + 5, BASE.Y + 5, backZ - 15), WALL)
     for hz = backZ - 4, backZ - 28, -8 do
         local fix = newPart("HallLight", Vector3.new(2, 0.3, 2), CFrame.new(centerX, BASE.Y + 9.6, hz), Color3.fromRGB(255, 245, 225), Enum.Material.Neon)
-        local pl = Instance.new("PointLight"); pl.Color = Color3.fromRGB(255, 240, 215); pl.Brightness = 1.4; pl.Range = 16; pl.Parent = fix
+        local pl = Instance.new("PointLight"); pl.Color = Color3.fromRGB(206, 214, 232); pl.Brightness = 0.8; pl.Range = 18; pl.Parent = fix
     end
 
     -- TIMELINE
@@ -1084,17 +1042,61 @@ local function playNightTransition()
         if d:IsA("BillboardGui") and d.Name == "DeskBeaconLabel" and d.Enabled then d.Enabled = false; table.insert(hiddenBillboards, d) end
     end
 
-    local Lighting = game:GetService("Lighting")
     local function setCC(b: number, c: number, s: number, tint: Color3)
         local cc = Lighting:FindFirstChild("GameColorCorrection") or Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
         if cc and cc:IsA("ColorCorrectionEffect") then cc.Brightness = b; cc.Contrast = c; cc.Saturation = s; cc.TintColor = tint end
     end
+    -- Late night, not midday. This used to force ClockTime 14 with a flat grey
+    -- 84/84/84 ambient, which lit the set like an office at lunchtime and made
+    -- the whole sequence read as a white room. The room is now dark, cold and
+    -- blue, and the only real light is what the practicals throw: overhead
+    -- fluorescents at half strength, and monitors on faces.
     local lightOverride = RunService.RenderStepped:Connect(function()
-        Lighting.Ambient = Color3.fromRGB(84,82,80); Lighting.OutdoorAmbient = Color3.fromRGB(84,82,80)
-        Lighting.Brightness = 1.6; Lighting.ClockTime = 14; Lighting.FogStart = 0; Lighting.FogEnd = 1e6
-        setCC(0,0,0,Color3.new(1,1,1))
+        -- Ambient is the lever here, not the fixtures. Roblox adds Ambient flatly
+        -- everywhere regardless of occlusion, and this set is a sealed box, so the
+        -- practicals only ever add pools on top of it. What made the original read
+        -- as midday was not that Ambient was high, it was that it was high AND
+        -- neutral grey; the same magnitude shifted hard to blue reads as night.
+        Lighting.Ambient = Color3.fromRGB(44, 48, 70)
+        Lighting.OutdoorAmbient = Color3.fromRGB(26, 30, 44)
+        -- Brightness 0, i.e. no sun and no moon. Every part in this set is built
+        -- with CastShadow = false, so the ceiling does not block skylight: any
+        -- Brightness at all pours straight through it and lights the interior as
+        -- if the room had no roof. That is what the original ClockTime 14 was
+        -- really doing, and it is why close-ups kept blowing out to white while
+        -- the wides looked fine. With it at zero the room is lit by exactly two
+        -- things, Ambient and the practicals, which is the whole point.
+        Lighting.Brightness = 0
+        Lighting.ClockTime = 0.8
+        -- Future feeds sky light into the scene through EnvironmentDiffuseScale,
+        -- separately from Brightness, and this shell casts no shadows to stop it.
+        Lighting.EnvironmentDiffuseScale = 0
+        Lighting.EnvironmentSpecularScale = 0
+        Lighting.FogColor = Color3.fromRGB(9, 10, 17)
+        -- Fog starts well back on purpose. At FogStart 14 the wide shots were dark
+        -- only because the fog was crushing them, while every close-up sat INSIDE
+        -- the fog and rendered at the true ambient, which is why faces blew out
+        -- white in the same scene that looked like a blackout from across the room.
+        -- Pulled back, the room's darkness comes from ambient and the practicals,
+        -- and it reads the same at both ends of the lens.
+        Lighting.FogStart = 40
+        Lighting.FogEnd = 200
+        -- With an Atmosphere present the Fog settings above are ignored, and
+        -- whatever phase we came from (a light grey day haze) washed every wide
+        -- shot of this set out to white. Hold it at the night's values.
+        local atmos = Lighting:FindFirstChildOfClass("Atmosphere")
+        if atmos then
+            atmos.Density = 0.3; atmos.Offset = 0.05
+            atmos.Color = Color3.fromRGB(10, 12, 18); atmos.Decay = Color3.fromRGB(3, 4, 7)
+            atmos.Glare = 0; atmos.Haze = 0.6
+        end
+        -- Cold, slightly crushed, a little desaturated: 3am on a bad monitor.
+        setCC(-0.02, 0.14, -0.12, Color3.fromRGB(198, 206, 235))
         local blur = Lighting:FindFirstChild("GameBlur"); if blur and blur:IsA("BlurEffect") then blur.Size = 0 end
-        local bloom = Lighting:FindFirstChild("GameBloom") or Lighting:FindFirstChildOfClass("BloomEffect"); if bloom and bloom:IsA("BloomEffect") then bloom.Intensity = 0 end
+        local bloom = Lighting:FindFirstChild("GameBloom") or Lighting:FindFirstChildOfClass("BloomEffect")
+        -- Bloom stays ON here, unlike before: it is what makes the monitors and
+        -- the tube fixtures read as the only light sources in a dark room.
+        if bloom and bloom:IsA("BloomEffect") then bloom.Intensity = 0.35; bloom.Size = 26; bloom.Threshold = 1 end
     end)
     table.insert(conns, lightOverride)
 
@@ -1107,79 +1109,116 @@ local function playNightTransition()
     task.wait(0.4)
     showCaption("As the hours pass, everyone frantically tries to finish their projects.", 3.4)
 
-    cutToFace(slammer, 0.9, 4.0)
+    -- Wide sideways offsets on the two desk actors on purpose: the monitor sits
+    -- 2.5 studs in front of them, so a straight-on close-up is framed THROUGH the
+    -- back of the screen. Coming in off the shoulder clears it and puts the
+    -- monitor glow across the face instead of behind it.
+    cutToFace(slammer, 2.4, 3.2)
     showCaption('"Why won\'t it compile? WHY won\'t it compile?!"', 2.6)
-    cutToFace(shaker, -0.9, 3.8)
+    cutToFace(shaker, -2.4, 3.2)
     showCaption('"Three hundred errors... I can\'t even look anymore."', 2.6)
     cutToFace(rager, 0.6, 4.2)
     showCaption('"There\'s no way. There\'s no way I finish in time!"', 2.6)
     camera.CFrame = CFrame.lookAt(Vector3.new(centerX + 24, standY + 1.5, BASE.Z + 4), Vector3.new(centerX + 14, standY - 0.3, BASE.Z - 3))
     showCaption('"I can\'t do this. I can\'t, I can\'t, I can\'t..."', 2.6)
 
-    -- (5) Close-up of the last hacker breaking — the line, with the screen shaking.
+    -- (5) Close-up of the last hacker breaking, the line, with the screen shaking.
     cutToFace(victim, 0.4, 3.6)
     showCaption('"No. No, no, no, no—"', 1.6)
     local climaxShake = startCamShake(1.7)
     showCaption('"I\'m... I\'m NOT GONNA MAKE IT!!"', 1.8)
+    climaxShake:Disconnect()
 
-    -- (6) They convulse and mutate into an NGMI, right there in the room.
-    local spazConn = startSpaz(victim, 26)
-    task.wait(1.5)
-    spazConn:Disconnect(); climaxShake:Disconnect()
-    for key, baseC0 in victim.base do local mt = victim.J[key]; if mt then mt.C0 = baseC0 end end
-    ngmify(victim)
-    lightningFlash(0.7)
-
-    -- (7) One by one the rest of the room turns; then the NGMIs rise and shamble
-    --     out the back doorway into the hallway.
-    camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 3, BASE.Z + 18), Vector3.new(centerX, standY - 0.5, BASE.Z - 6))
-    showCaption("One by one, they stop being hackers.", 1.0)
-    for _, a in { slammer, shaker, rager, pacer } do
-        a.update = nil
-        ngmify(a)
-        task.wait(0.5)
+    -- (6) The victim turns, framed wide enough to see the whole body go.
+    -- Every mutation from here on lands under a flash and a blur snap.
+    onMutate = function(_a: any)
+        lightningFlash(0.5)
+        getCutsceneBlur().Size = 10
+        motionBlur(0, 0.35)
     end
-    task.wait(0.5)
+    cutToLocal(victim, Vector3.new(1.2, 0.6, -7.5), Vector3.new(0, -0.2, 0), 52)
+    local turnShake = startCamShake(0.8)
+    startTurn(victim)
+    task.wait(NGMIChoreo.TURN.unravel.length - 0.3)
+    turnShake:Disconnect()
 
+    -- (7) One by one the room turns. A montage, each turn shot for what is
+    --     wrong with it: the slammer from the side for the neck, the face on
+    --     the desk from low for the twisted lift, the rager wide for the fold,
+    --     and the starer dead on so its head snaps round into the lens.
+    camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 3, BASE.Z + 18), Vector3.new(centerX, standY - 0.5, BASE.Z - 6))
+    snapCut(74)
+    showCaption("One by one, they stop being hackers.", 1.0)
+    local montage = {
+        { a = slammer, cam = Vector3.new(3.4, 1.8, -2.4), look = Vector3.new(0, 1.4, 0), fov = 50, hold = 2.5 },
+        { a = facedesker, cam = Vector3.new(-1.9, 0.5, -2.1), look = Vector3.new(0, 1.0, -0.4), fov = 46, hold = 2.6 },
+        { a = rager, cam = Vector3.new(2.2, 0.6, -8.5), look = Vector3.new(0, -0.4, 0), fov = 50, hold = 2.7 },
+        { a = starer, cam = Vector3.new(0.15, 1.9, -2.3), look = Vector3.new(0, 1.5, 0), fov = 42, hold = 2.3 },
+    }
+    for _, shot in montage do
+        if shot.a then
+            startTurn(shot.a)
+            -- cut a beat into the move so the edit lands on motion
+            task.wait(0.12)
+            cutToLocal(shot.a, shot.cam, shot.look, shot.fov)
+            task.wait(shot.hold)
+        end
+    end
+    -- the last two go together, in the wide
+    camera.CFrame = CFrame.lookAt(Vector3.new(centerX + 6, standY + 2.2, BASE.Z + 15), Vector3.new(centerX + 4, standY - 0.6, BASE.Z - 4))
+    snapCut(66)
+    startTurn(shaker)
+    task.wait(0.35)
+    startTurn(pacer)
+    task.wait(2.6)
+
+    -- (8a) They rise and shamble out the back doorway into the hallway.
     local exits = {}
     local lanes = { 0, -2, 2, -3.4, 3.4 }
-    for i, a in { victim, rager, pacer, slammer, shaker } do
-        for key, baseC0 in a.base do local mt = a.J[key]; if mt then mt.C0 = baseC0 end end
-        local p = a.model:GetPivot().Position
-        table.insert(exits, { a = a, start = Vector3.new(p.X, standY, p.Z), lane = lanes[i], delay = (i - 1) * 0.45 })
+    local slot = 0
+    for _, a in { victim, rager, pacer, slammer, shaker, facedesker, starer } do
+        if a then
+            slot += 1
+            a.mode = "walk"
+            a.seated = false
+            local p = a.model:GetPivot().Position
+            table.insert(exits, { a = a, start = Vector3.new(p.X, standY, p.Z), lane = lanes[((slot - 1) % #lanes) + 1], delay = (slot - 1) * 0.4 })
+        end
     end
     local walkStart = os.clock()
     local walkConn = RunService.Heartbeat:Connect(function()
         local now = os.clock() - walkStart
         for _, e in exits do
-            local t = now - e.delay
-            if t > 0 then
-                local a = e.a
-                local door = Vector3.new(centerX + e.lane, standY, backZ + 2)
-                local hall = Vector3.new(centerX + e.lane, standY, backZ - 24)
-                local d1 = door - e.start
-                local seg1 = d1.Magnitude
-                local dist = t * 4.5
-                local pos, dir
-                if dist < seg1 then pos = e.start + d1.Unit * dist; dir = d1
-                else local d2 = hall - door; pos = door + d2.Unit * math.min(dist - seg1, d2.Magnitude); dir = d2 end
-                dir = Vector3.new(dir.X, 0, dir.Z); if dir.Magnitude < 0.01 then dir = Vector3.new(0,0,-1) end
-                local bob = math.abs(math.sin((now + a.phase) * 5)) * 0.14
-                a.setPivot(CFrame.lookAt(pos + Vector3.new(0, bob, 0), pos + Vector3.new(0, bob, 0) + dir.Unit))
-                local sw = math.rad(24) * math.sin(now * 5 + a.phase)
-                a.bend("rH", CFrame.Angles(sw,0,0)); a.bend("lH", CFrame.Angles(-sw,0,0))
-                a.bend("rS", CFrame.Angles(math.rad(22)+math.rad(6)*math.sin(now*5),0,0)); a.bend("lS", CFrame.Angles(math.rad(22)-math.rad(6)*math.sin(now*5),0,0))
+            local t = math.max(0, now - e.delay)
+            local a = e.a
+            local door = Vector3.new(centerX + e.lane, standY, backZ + 2)
+            local hall = Vector3.new(centerX + e.lane, standY, backZ - 24)
+            local d1 = door - e.start
+            local seg1 = d1.Magnitude
+            -- uneven pace: every lurch stalls them for a beat
+            local dist = math.max(0, t * 4.2 - math.max(0, math.sin(t * 1.6 + a.phase)) * 0.6)
+            local pos, dir
+            if dist < seg1 then pos = e.start + d1.Unit * dist; dir = d1
+            else local d2 = hall - door; pos = door + d2.Unit * math.min(dist - seg1, d2.Magnitude); dir = d2 end
+            dir = Vector3.new(dir.X, 0, dir.Z); if dir.Magnitude < 0.01 then dir = Vector3.new(0,0,-1) end
+            a.setPivot(CFrame.lookAt(pos, pos + dir.Unit))
+            if now > e.delay then
+                a.walkPose = NGMIChoreo.shamble(now, dist * 1.7 + a.phase, a)
+            else
+                -- up out of the chair, waiting its turn to move
+                a.walkPose = NGMIChoreo.idle(now, a)
             end
         end
     end)
     table.insert(conns, walkConn)
     task.wait(0.4)
     camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 2.4, BASE.Z + 6), Vector3.new(centerX, standY - 0.2, backZ - 8))
+    snapCut(70)
     task.wait(3.6)
 
     -- (8) Lightning through the window — then the power dies.
     skyPL.Brightness = 9; lightningFlash(1)
-    task.wait(0.12); skyPL.Brightness = 0; task.wait(0.18)
+    task.wait(0.12); skyPL.Brightness = 0.6; task.wait(0.18)
     skyPL.Brightness = 11; lightningFlash(1)
     local powerShake = startCamShake(3)
     task.wait(0.16); skyPL.Brightness = 0
@@ -1192,6 +1231,11 @@ local function playNightTransition()
         if p then
             Lighting.Ambient = p.Ambient; Lighting.OutdoorAmbient = p.OutdoorAmbient; Lighting.Brightness = p.Brightness
             Lighting.ClockTime = p.ClockTime; Lighting.FogColor = p.FogColor; Lighting.FogEnd = p.FogEnd; Lighting.FogStart = p.FogStart
+            -- The set above zeroed the environment scales; hand them back so wet
+            -- floors keep their specular response for the night.
+            Lighting.ShadowSoftness = p.ShadowSoftness
+            Lighting.EnvironmentDiffuseScale = p.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = p.EnvironmentSpecularScale
             local cc = p.PostProcessing and p.PostProcessing.ColorCorrection
             if cc then setCC(cc.Brightness, cc.Contrast, cc.Saturation, cc.TintColor) end
             local b = p.PostProcessing and p.PostProcessing.Bloom
@@ -1251,6 +1295,9 @@ local function playNightTransition()
     for _, c in conns do c:Disconnect() end
     set:Destroy(); gui:Destroy()
     camera.CameraType = Enum.CameraType.Custom
+    -- The close-ups left the lens long and the blur hot; hand both back to
+    -- gameplay or NIGHT2 opens on a 48-degree blurred frame.
+    resetLens()
     if humanoid then camera.CameraSubject = humanoid end
     ProximityPromptService.Enabled = true
     for _, g in hiddenGuis do if g.Parent and g.Name ~= "LobbyGui" then g.Enabled = true end end
