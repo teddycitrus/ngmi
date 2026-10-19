@@ -10,6 +10,7 @@
 --------------------------------------------------------------------------------
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 local RigFactory = {}
 
@@ -17,17 +18,38 @@ local RigFactory = {}
 local ANIM = {
 	idle = "rbxassetid://507766388",
 	walk = "rbxassetid://507777826",
-	sit  = "rbxassetid://2506281703",
+	sit = "rbxassetid://2506281703",
+}
+
+--------------------------------------------------------------------------------
+-- Surfacing
+--------------------------------------------------------------------------------
+-- Roblox's built-in materials carry their own PBR response, so Fabric on
+-- clothing reads as cloth under Future lighting with no uploaded assets.
+--------------------------------------------------------------------------------
+
+-- Built-in material per body region. These apply unconditionally.
+local MATERIALS = {
+	skin = Enum.Material.SmoothPlastic,
+	clothing = Enum.Material.Fabric,
+	pants = Enum.Material.Fabric,
 }
 
 local HOODIES = {
-	Color3.fromRGB(40, 90, 170), Color3.fromRGB(40, 160, 90), Color3.fromRGB(150, 60, 170),
-	Color3.fromRGB(200, 120, 40), Color3.fromRGB(55, 60, 72), Color3.fromRGB(170, 50, 60),
-	Color3.fromRGB(60, 150, 160), Color3.fromRGB(220, 200, 60),
+	Color3.fromRGB(40, 90, 170),
+	Color3.fromRGB(40, 160, 90),
+	Color3.fromRGB(150, 60, 170),
+	Color3.fromRGB(200, 120, 40),
+	Color3.fromRGB(55, 60, 72),
+	Color3.fromRGB(170, 50, 60),
+	Color3.fromRGB(60, 150, 160),
+	Color3.fromRGB(220, 200, 60),
 }
 local SKINS = {
-	Color3.fromRGB(235, 200, 170), Color3.fromRGB(205, 165, 125),
-	Color3.fromRGB(160, 115, 85), Color3.fromRGB(110, 80, 55),
+	Color3.fromRGB(235, 200, 170),
+	Color3.fromRGB(205, 165, 125),
+	Color3.fromRGB(160, 115, 85),
+	Color3.fromRGB(110, 80, 55),
 }
 local PANTS = { Color3.fromRGB(40, 44, 55), Color3.fromRGB(60, 62, 70), Color3.fromRGB(80, 70, 60) }
 
@@ -42,9 +64,24 @@ local LEG_PARTS = { "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg",
 local template: Model? = nil
 local triedTemplate = false
 
+--- Description used for every rig. BodyTypeScale/ProportionScale at 1 pulls the
+--- default R15 away from the blocky classic build toward realistic human
+--- proportions, which is the single biggest fidelity win available without
+--- uploaded body-part assets. Add bundle part ids here (HeadColor, Torso, ...)
+--- to swap in a purchased Rthro body.
+local function buildDescription(): HumanoidDescription
+	local desc = Instance.new("HumanoidDescription")
+	desc.BodyTypeScale = 1
+	desc.ProportionScale = 1
+	desc.HeightScale = 1
+	desc.WidthScale = 1
+	desc.DepthScale = 1
+	return desc
+end
+
 local function buildTemplate(): Model?
 	local ok, model = pcall(function()
-		return Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R15)
+		return Players:CreateHumanoidModelFromDescription(buildDescription(), Enum.HumanoidRigType.R15)
 	end)
 	if ok and model and model:IsA("Model") then
 		model.Name = "RigTemplate"
@@ -106,7 +143,9 @@ local function buildBlockRig(): Model
 	local head = blockPart(model, "Head", Vector3.new(1.2, 1.2, 1.2), origin * CFrame.new(0, 1.6, 0), skin)
 	head.Shape = Enum.PartType.Ball
 	weld(torso, head, CFrame.new(0, 1.6, 0))
-	Instance.new("Decal", head).Name = "face"
+	local face = Instance.new("Decal")
+	face.Name = "face"
+	face.Parent = head
 	local function limb(name: string, off: CFrame, color: Color3)
 		local l = blockPart(model, name, Vector3.new(1, 2, 1), origin * off, color)
 		weld(torso, l, off)
@@ -118,7 +157,8 @@ local function buildBlockRig(): Model
 
 	local hum = Instance.new("Humanoid")
 	hum.Parent = model
-	Instance.new("Animator", hum)
+	local animator = Instance.new("Animator")
+	animator.Parent = hum
 	model.PrimaryPart = root
 	return model
 end
@@ -126,22 +166,28 @@ end
 --------------------------------------------------------------------------------
 -- Colour a real rig
 --------------------------------------------------------------------------------
+--- Colour + surface a real rig. Region names map to a colour and a built-in
+--- material.
 local function recolor(model: Model)
 	local hoodie = HOODIES[math.random(#HOODIES)]
 	local skin = SKINS[math.random(#SKINS)]
 	local pants = PANTS[math.random(#PANTS)]
-	local function setColors(names: { string }, color: Color3)
+
+	local function surface(names: { string }, color: Color3, region: string)
+		local material = MATERIALS[region]
 		for _, n in names do
 			local part = model:FindFirstChild(n)
 			if part and part:IsA("BasePart") then
 				part.Color = color
+				part.Material = material
 			end
 		end
 	end
-	setColors(TORSO_PARTS, hoodie)
-	setColors(ARM_PARTS, hoodie)
-	setColors(SKIN_PARTS, skin)
-	setColors(LEG_PARTS, pants)
+
+	surface(TORSO_PARTS, hoodie, "clothing")
+	surface(ARM_PARTS, hoodie, "clothing")
+	surface(SKIN_PARTS, skin, "skin")
+	surface(LEG_PARTS, pants, "pants")
 end
 
 --------------------------------------------------------------------------------
@@ -177,8 +223,8 @@ local function getAnimator(hum: Humanoid): Animator
 	return animator
 end
 
---- Play a looping animation on a humanoid; returns the track (or nil on failure).
-function RigFactory.playLoop(hum: Humanoid, animId: string): AnimationTrack?
+--- Load a looping animation without starting it (nil on failure).
+local function loadLoop(hum: Humanoid, animId: string): AnimationTrack?
 	local anim = Instance.new("Animation")
 	anim.AnimationId = animId
 	local ok, track = pcall(function()
@@ -186,10 +232,18 @@ function RigFactory.playLoop(hum: Humanoid, animId: string): AnimationTrack?
 	end)
 	if ok and track then
 		track.Looped = true
-		track:Play()
 		return track
 	end
 	return nil
+end
+
+--- Play a looping animation on a humanoid; returns the track (or nil on failure).
+function RigFactory.playLoop(hum: Humanoid, animId: string): AnimationTrack?
+	local track = loadLoop(hum, animId)
+	if track then
+		track:Play()
+	end
+	return track
 end
 
 --- Make a seated NPC: anchor it in place and play the sit animation.
@@ -201,21 +255,102 @@ function RigFactory.sit(model: Model, hum: Humanoid)
 	RigFactory.playLoop(hum, ANIM.sit)
 end
 
---- Drive idle/walk animation for a roaming NPC based on its movement.
+-- Ground speed the default R15 walk covers at playback speed 1. Measured by
+-- pinning a rig and timing the planted foot: it slides back at 15.7-17.4
+-- studs/s. Playing it at speed 1 for an NPC strolling at 6 cycled the legs
+-- nearly three times too fast, which is what made the gait look wrong.
+local WALK_NATURAL_SPEED = 16
+
+--- Drive idle/walk animation for a roaming NPC from how fast its root is
+--- actually moving: walk playback is scaled so the feet match the ground, and
+--- the two tracks crossfade instead of snapping.
+---
+--- This reads velocity every frame rather than listening to Humanoid.Running:
+--- Running dips to ~0 at every path waypoint, which restarted the walk over
+--- and over (on clients the NPCs often slid along on the idle animation).
+--- Hysteresis keeps the walk going through those dips.
 function RigFactory.driveLocomotion(hum: Humanoid)
 	local idle = RigFactory.playLoop(hum, ANIM.idle)
-	local walk: AnimationTrack? = nil
-	hum.Running:Connect(function(speed: number)
-		if speed > 0.5 then
-			if not walk then
-				walk = RigFactory.playLoop(hum, ANIM.walk)
+	local walk = loadLoop(hum, ANIM.walk)
+	local moving = false
+	local stillFor = 0
+	local lastRate = -1
+	local conn: RBXScriptConnection
+	conn = RunService.Heartbeat:Connect(function(dt: number)
+		local root = hum.RootPart
+		if not hum.Parent or not root then
+			conn:Disconnect()
+			return
+		end
+		local v = root.AssemblyLinearVelocity
+		local speed = if root.Anchored then 0 else Vector3.new(v.X, 0, v.Z).Magnitude
+		-- "WalkIntent" lets a caller start the cycle just before moving off, so
+		-- the animation reaches clients by the time the body does.
+		if speed > 1.5 or hum:GetAttribute("WalkIntent") == true then
+			stillFor = 0
+			-- Rate from the speed the NPC is walking at, not this frame's
+			-- velocity: on the first frames it is still accelerating, and a
+			-- burst of AdjustSpeed calls doesn't reliably reach clients.
+			local rate = math.clamp(hum.WalkSpeed / WALK_NATURAL_SPEED, 0.3, 1.4)
+			if not moving then
+				moving = true
+				lastRate = rate
+				if walk then
+					walk:Play(0.3, 1, rate)
+				end
+				if idle then
+					idle:Stop(0.3)
+				end
+			elseif walk and math.abs(rate - lastRate) > 0.04 then
+				walk:AdjustSpeed(rate)
+				lastRate = rate
 			end
-			if idle then idle:Stop() end
-		else
-			if walk then walk:Stop(); walk = nil end
-			if idle then idle:Play() end
+		elseif moving then
+			stillFor += dt
+			if stillFor > 0.3 then
+				moving = false
+				if walk then
+					walk:Stop(0.35)
+				end
+				if idle then
+					idle:Play(0.35)
+				end
+			end
 		end
 	end)
 end
+
+--- A standing NPC that stays put: anchored, idling.
+function RigFactory.stand(model: Model, hum: Humanoid)
+	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if root then
+		root.Anchored = true
+	end
+	local idle = RigFactory.playLoop(hum, ANIM.idle)
+	if idle then
+		-- out of step with everyone else, so a hallway doesn't breathe in unison
+		idle.TimePosition = math.random() * math.max(idle.Length, 0.1)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Split-out parts, re-exported so callers keep using RigFactory.*
+--------------------------------------------------------------------------------
+local Rig = script.Parent:WaitForChild("Rig")
+local Hair = require(Rig:WaitForChild("Hair"))
+local IK = require(Rig:WaitForChild("IK"))
+local Articulation = require(Rig:WaitForChild("Articulation"))
+
+export type HeadPieceOpts = Hair.HeadPieceOpts
+
+Hair.knitColors = HOODIES
+
+RigFactory.attachToHead = Hair.attachToHead
+RigFactory.applyHair = Hair.applyHair
+RigFactory.enableHeadTracking = IK.enableHeadTracking
+RigFactory.enableFootPlacement = IK.enableFootPlacement
+RigFactory.articulate = Articulation.articulate
+RigFactory.resetArticulation = Articulation.resetArticulation
+RigFactory.rampArticulation = Articulation.rampArticulation
 
 return RigFactory

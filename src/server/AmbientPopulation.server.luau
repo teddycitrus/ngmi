@@ -2,22 +2,26 @@
 --------------------------------------------------------------------------------
 -- AmbientPopulation.server.luau
 -- Fills the venue with ambience: real Roblox avatar rigs seated at desks (in a
--- variety of postures), hackers sitting against hallway walls with a laptop on
--- their lap, and a few crashed out asleep — on lounge couches and in sleeping
--- bags on the floor.
+-- variety of postures), hackers leaning against hallway walls, and a few
+-- crashed out asleep on lounge couches and in sleeping bags on the floor.
 --
 -- These are NOT the dialogue NPCs (those live in NPCManager). They are anchored,
 -- AI-less avatar rigs created by RigFactory. Total count is capped for
 -- performance. They clear out when Night 2 begins (the labs empty as the
 -- outbreak starts).
+--
+-- Postures go through Shared.RigPose. These rigs have no Motor6Ds (each joint
+-- is an AnimationConstraint), so editing C0s, as this script used to, did
+-- nothing at all. RigPose offsets the joints underneath whatever animation is
+-- playing, and the change replicates because the server makes it.
 --------------------------------------------------------------------------------
 
 local CollectionService = game:GetService("CollectionService")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local ServerStorage      = game:GetService("ServerStorage")
-local RunService         = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local RigPose = require(ReplicatedStorage.Shared.RigPose)
 local RigFactory = require(script.Parent.RigFactory)
 local AssetLibrary = require(script.Parent.AssetLibrary)
 
@@ -30,6 +34,8 @@ local MAX_LEANERS = 10
 local MAX_COUCH_SLEEPERS = 4
 local MAX_BAG_SLEEPERS = 4
 
+local V = Vector3.new
+
 local folder = Instance.new("Folder")
 folder.Name = "AmbientPeople"
 folder.Parent = workspace
@@ -41,130 +47,43 @@ local leanerCount = 0
 local couchSleeperCount = 0
 local bagSleeperCount = 0
 
--- Laptops come from the shared, editable AssetLibrary "Laptop" template. The
--- template's user side (where the screen faces) is +Z, so a laptop placed with
--- the same orientation as a rig's HumanoidRootPart has its screen facing back
--- toward that rig.
-
 --------------------------------------------------------------------------------
--- Desk activities — give each seated hacker something to "do": typing, smashing
--- their desk in rage, slumped resting their head, or leaning back. Poses are set
--- once via Motor6D C0 offsets (layered over the sit animation); the type/smash
--- variants also get a subtle looping motion from the shared loop below.
+-- Postures (RigPose conventions: waist/neck X+ forward, shoulders X+ raise
+-- forward, elbows X- flex)
 --------------------------------------------------------------------------------
 
-local ACTIVITIES = { "type", "type", "type", "rest", "recline", "smash", "headhand" }
-
-type SeatedAnim = {
-	kind: string,
-	rS: Motor6D,
-	lS: Motor6D,
-	baseR: CFrame,
-	baseL: CFrame,
-	phase: number,
-	speed: number,
+local DESK_POSES: { RigPose.Pose } = {
+	-- typing: forearms out to the keyboard, eyes on the screen
+	{ neck = V(12, 0, 0), rS = V(42, 0, -6), lS = V(42, 0, 6), rE = V(-58, 0, 0), lE = V(-58, 0, 0) },
+	{ neck = V(12, 0, 0), rS = V(42, 0, -6), lS = V(42, 0, 6), rE = V(-58, 0, 0), lE = V(-58, 0, 0) },
+	{ waist = V(8, 0, 0), neck = V(16, 0, 0), rS = V(46, 0, -8), lS = V(46, 0, 8), rE = V(-52, 0, 0), lE = V(-52, 0, 0) },
+	-- passed out on the desk, arms folded under the head
+	{ waist = V(44, 0, 0), neck = V(26, 0, 0), rS = V(78, 0, -10), lS = V(78, 0, 10), rE = V(-96, 0, 0), lE = V(-96, 0, 0) },
+	-- leaned back, staring at the ceiling
+	{ waist = V(-14, 0, 0), neck = V(-12, 0, 0), rS = V(12, 0, 4), lS = V(12, 0, -4) },
+	-- chin propped on one hand
+	{ waist = V(16, 0, 0), neck = V(8, 0, 9), rS = V(70, 0, -14), rE = V(-118, 0, 0), lS = V(38, 0, 6), lE = V(-60, 0, 0) },
+	-- head in both hands
+	{ waist = V(24, 0, 0), neck = V(22, 0, 0), rS = V(76, 0, -18), lS = V(76, 0, 18), rE = V(-122, 0, 0), lE = V(-122, 0, 0) },
 }
-local animatedSeated: { SeatedAnim } = {}
 
-local function motorIn(model: Model, partName: string, motorName: string): Motor6D?
-	local part = model:FindFirstChild(partName)
-	if not part then
-		return nil
-	end
-	local m = part:FindFirstChild(motorName)
-	if m and m:IsA("Motor6D") then
-		return m
-	end
-	return nil
+local LEAN_POSES: { RigPose.Pose } = {
+	-- scrolling a phone held at the chest
+	{ neck = V(30, 0, 0), rS = V(30, 0, -8), rE = V(-104, 0, 0), lS = V(6, 0, 6) },
+	-- arms folded
+	{ neck = V(4, 0, 0), rS = V(28, 0, -30), lS = V(28, 0, 30), rE = V(-112, 0, 0), lE = V(-112, 0, 0) },
+	-- hands in pockets, head tipped back against the wall
+	{ neck = V(-10, 0, 0), rS = V(-6, 0, 10), lS = V(-6, 0, -10), rE = V(-28, 0, 0), lE = V(-28, 0, 0) },
+}
+
+--- Offset a rig's joints into a posture (layered under its animation).
+local function pose(model: Model, p: RigPose.Pose)
+	RigPose.new(model):rebase(p)
 end
 
-local function setupSeatedActivity(model: Model)
-	local kind = ACTIVITIES[math.random(#ACTIVITIES)]
-	local waist = motorIn(model, "UpperTorso", "Waist")
-	local neck = motorIn(model, "Head", "Neck")
-	local rS = motorIn(model, "RightUpperArm", "RightShoulder")
-	local lS = motorIn(model, "LeftUpperArm", "LeftShoulder")
-
-	if kind == "rest" then
-		-- passed out: slumped right forward, head down on the desk, arms folded
-		-- under it as a pillow
-		if waist then
-			waist.C0 = waist.C0 * CFrame.Angles(math.rad(48), 0, 0)
-		end
-		if neck then
-			neck.C0 = neck.C0 * CFrame.Angles(math.rad(28), 0, 0)
-		end
-		if rS then
-			rS.C0 = rS.C0 * CFrame.Angles(math.rad(72), 0, 0)
-		end
-		if lS then
-			lS.C0 = lS.C0 * CFrame.Angles(math.rad(72), 0, 0)
-		end
-	elseif kind == "recline" then
-		-- leaned back in the chair, hands behind the head-ish (arms up a little)
-		if waist then
-			waist.C0 = waist.C0 * CFrame.Angles(math.rad(-14), 0, 0)
-		end
-		if neck then
-			neck.C0 = neck.C0 * CFrame.Angles(math.rad(-8), 0, 0)
-		end
-	elseif kind == "headhand" then
-		-- bored: chin propped on one hand, elbow on the desk, gazing at the screen
-		if waist then
-			waist.C0 = waist.C0 * CFrame.Angles(math.rad(18), 0, 0)
-		end
-		if neck then
-			neck.C0 = neck.C0 * CFrame.Angles(math.rad(10), 0, math.rad(8))
-		end
-		if rS then
-			rS.C0 = rS.C0 * CFrame.Angles(math.rad(98), 0, math.rad(-16))
-		end
-		if lS then
-			lS.C0 = lS.C0 * CFrame.Angles(math.rad(34), 0, 0)
-		end
-	elseif (kind == "type" or kind == "smash") and rS and lS then
-		-- arms forward toward the keyboard, glancing down, then animated by the loop
-		rS.C0 = rS.C0 * CFrame.Angles(math.rad(42), 0, 0)
-		lS.C0 = lS.C0 * CFrame.Angles(math.rad(42), 0, 0)
-		if neck then
-			neck.C0 = neck.C0 * CFrame.Angles(math.rad(12), 0, 0)
-		end
-		table.insert(animatedSeated, {
-			kind = kind,
-			rS = rS,
-			lS = lS,
-			baseR = rS.C0,
-			baseL = lS.C0,
-			phase = math.random() * math.pi * 2,
-			speed = 0.8 + math.random() * 0.6,
-		})
-	end
-end
-
--- One shared, throttled loop drives the typing/smashing motion for all rigs.
-local animAccum = 0
-RunService.Heartbeat:Connect(function(dt: number)
-	animAccum += dt
-	if animAccum < 0.12 then -- ~8 Hz is plenty for ambient motion
-		return
-	end
-	animAccum = 0
-	local t = os.clock()
-	for i = #animatedSeated, 1, -1 do
-		local a = animatedSeated[i]
-		if not a.rS.Parent then
-			table.remove(animatedSeated, i)
-		elseif a.kind == "type" then
-			local bob = math.sin(t * 9 * a.speed + a.phase) * math.rad(7)
-			a.rS.C0 = a.baseR * CFrame.Angles(bob, 0, 0)
-			a.lS.C0 = a.baseL * CFrame.Angles(-bob, 0, 0)
-		else -- smash: periodic angry slam
-			local hit = math.sin(t * 3 * a.speed + a.phase) > 0.65 and math.rad(32) or 0
-			a.rS.C0 = a.baseR * CFrame.Angles(hit, 0, 0)
-			a.lS.C0 = a.baseL * CFrame.Angles(hit, 0, 0)
-		end
-	end
-end)
+--------------------------------------------------------------------------------
+-- Desk workers
+--------------------------------------------------------------------------------
 
 local function spawnSeated(seat: Part)
 	if seatedCount >= MAX_SEATED then
@@ -175,24 +94,30 @@ local function spawnSeated(seat: Part)
 	local faceZ = (seat:GetAttribute("FaceZ") :: number?) or -1
 
 	local model, hum = RigFactory.create()
+	RigFactory.applyHair(model, math.random(0, 999999))
 	-- Sit on the chair facing the desk
-	model:PivotTo(CFrame.lookAt(pos + Vector3.new(0, 2.6, 0), pos + Vector3.new(0, 2.6, faceZ)))
+	model:PivotTo(CFrame.lookAt(pos + V(0, 2.6, 0), pos + V(0, 2.6, faceZ)))
 	model.Parent = folder
 	RigFactory.sit(model, hum)
-	setupSeatedActivity(model)
+	pose(model, DESK_POSES[math.random(#DESK_POSES)])
 
-	-- The vast majority of coders work off a LAPTOP, not the desktop monitor.
-	-- For those, hide the workstation's monitor + screen glow and set a laptop on
-	-- the desk in front of them (screen toward the seated worker). The station is
-	-- the seat's parent model, so we can place the laptop in its local space and
-	-- it inherits the desk's rotation/jitter.
+	-- Glance up from the screen at whoever walks past. Anchored, seated rigs
+	-- get head tracking only; foot IK is for rigs that actually walk.
+	RigFactory.enableHeadTracking(model, hum)
+
+	-- Most coders work off a laptop: hide the workstation's monitor and set a
+	-- laptop on the desk in front of them. The station is the seat's parent
+	-- model, so the laptop goes in its local space and inherits its rotation.
+	-- The template's user side is +Z, the same side as the station's chair, so
+	-- it takes the station's orientation unrotated. (It used to be spun 180
+	-- degrees, which turned every screen away from its user.)
 	local station = seat.Parent
 	if math.random() < 0.85 and station and station:IsA("Model") and station.PrimaryPart then
-		for _, n in { "Monitor", "Screen" } do
-			local m = station:FindFirstChild(n)
-			if m then m:Destroy() end
+		local monitor = station:FindFirstChild("Monitor")
+		if monitor then
+			monitor:Destroy()
 		end
-		local lap = AssetLibrary.clone("Laptop", station:GetPivot() * CFrame.new(0, 3.35, -0.3) * CFrame.Angles(0, math.rad(180), 0))
+		local lap = AssetLibrary.clone("Laptop", station:GetPivot() * CFrame.new(0, 3.35, -0.1))
 		if lap then
 			lap.Parent = model -- cleared with the rig on Night 2
 		end
@@ -201,116 +126,174 @@ local function spawnSeated(seat: Part)
 	table.insert(spawned, model)
 end
 
-local function spawnLeaning(spot: Part)
-	if leanerCount >= MAX_LEANERS then
+--------------------------------------------------------------------------------
+-- Hallway leaners
+--------------------------------------------------------------------------------
+
+local LEAN_TILT = math.rad(8) -- how far the body tips back onto the wall
+local FEET_OUT = 1.2 -- feet distance from the wall face; puts the shoulder blades on it
+local WALL_PROBE = 4.2 -- probe height: above the chair rail, below the posters
+
+--- Distance along `dir` to a true wall face, skipping things in front of it
+--- (banners, bins, people). Returns the hit position and the distance of the
+--- nearest skipped thing, or nil when no wall is in reach.
+local function castToWall(origin: Vector3, dir: Vector3): (Vector3?, number, number)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignore: { Instance } = { folder }
+	params.FilterDescendantsInstances = ignore
+	local lastClutter = 0
+	for _ = 1, 10 do
+		local hit = workspace:Raycast(origin, dir * 24, params)
+		if not hit then
+			return nil, 0, 0
+		end
+		if hit.Instance.Name == "Wall" then
+			return hit.Position, hit.Distance, lastClutter
+		end
+		-- Trim, posters and signs are flat on the wall and don't collide; only
+		-- solid furniture (lockers, benches, fountains) is in the way.
+		if hit.Instance.CanCollide then
+			lastClutter = hit.Distance
+		end
+		table.insert(ignore, hit.Instance)
+		params.FilterDescendantsInstances = ignore
+	end
+	return nil, 0, 0
+end
+
+-- Clear depth needed in front of the wall for a leaning body.
+local LEAN_CLEARANCE = FEET_OUT + 1.4
+
+--- Nearest wall face from `origin` with room in front of it to lean: anything
+--- standing against the wall there (lockers, a bench, a fountain) rules that
+--- direction out, so a leaner never ends up inside the furniture.
+local function nearestWall(origin: Vector3): (Vector3?, Vector3?)
+	local best, bestDir, bestDist = nil, nil, math.huge
+	for _, dir in { V(1, 0, 0), V(-1, 0, 0), V(0, 0, 1), V(0, 0, -1) } do
+		local side = dir:Cross(Vector3.yAxis)
+		local pos, dist = nil, math.huge
+		local clear = true
+		-- the body's centre line first, then both shoulders and the knees
+		for i, off in { Vector3.zero, side * 1.1, -side * 1.1, V(0, -2.6, 0) } do
+			local p, d, clutter = castToWall(origin + off, dir)
+			if not p or (clutter > 0 and clutter > d - LEAN_CLEARANCE) then
+				clear = false
+				break
+			end
+			if i == 1 then
+				pos, dist = p, d
+			end
+		end
+		if clear and pos and dist < bestDist then
+			best, bestDir, bestDist = pos, dir, dist
+		end
+	end
+	return best, bestDir
+end
+
+--- A phone in the right hand, screen toward the face, welded so it follows
+--- the idle sway.
+local function givePhone(model: Model)
+	local hand = model:FindFirstChild("RightHand")
+	local head = model:FindFirstChild("Head")
+	if not (hand and hand:IsA("BasePart") and head and head:IsA("BasePart")) then
 		return
 	end
+	local phone = Instance.new("Part")
+	phone.Name = "Phone"
+	phone.Size = V(0.5, 0.9, 0.08)
+	phone.Color = Color3.fromRGB(24, 24, 28)
+	phone.Material = Enum.Material.SmoothPlastic
+	phone.CanCollide = false
+	phone.CanTouch = false
+	phone.CanQuery = false
+	phone.Massless = true
+	local at = hand.Position + (head.Position - hand.Position).Unit * 0.35
+	phone.CFrame = CFrame.lookAt(at, head.Position) * CFrame.Angles(math.rad(-20), 0, 0)
+	local screen = Instance.new("Part")
+	screen.Name = "PhoneScreen"
+	screen.Size = V(0.42, 0.8, 0.02)
+	screen.Color = Color3.fromRGB(120, 190, 255)
+	screen.Material = Enum.Material.Neon
+	screen.CanCollide = false
+	screen.CanTouch = false
+	screen.CanQuery = false
+	screen.Massless = true
+	screen.CFrame = phone.CFrame * CFrame.new(0, 0, -0.05)
+	for _, p in { phone, screen } do
+		local w = Instance.new("WeldConstraint")
+		w.Part0 = hand
+		w.Part1 = p
+		w.Parent = p
+		p.Parent = model
+	end
+end
+
+local function spawnLeaning(spot: Part)
+	if leanerCount >= MAX_LEANERS or string.find(spot.Name, "Stair") then
+		return -- standing on a staircase reads wrong
+	end
+	local floorY = spot.Position.Y - 0.2
+	-- try the marker, then a few spots either side of it
+	local wallPos, wallDir
+	for _, off in { V(0, 0, 0), V(4, 0, 0), V(-4, 0, 0), V(0, 0, 4), V(0, 0, -4), V(8, 0, 0), V(-8, 0, 0) } do
+		wallPos, wallDir = nearestWall(V(spot.Position.X, floorY + WALL_PROBE, spot.Position.Z) + off)
+		if wallPos then
+			break
+		end
+	end
+	if not (wallPos and wallDir) then
+		return -- nothing clear to lean on; leave the spot empty rather than float
+	end
 	leanerCount += 1
-	local pos = spot.Position
-	local sitY = pos.Y + 1.6
-	local origin = Vector3.new(pos.X, sitY, pos.Z)
 
-	-- Find the NEAREST wall in any cardinal direction and sit with the back flush
-	-- against it (facing into the room). We do NOT trust the marker's exact position
-	-- or a baked "Face" attribute — those left rigs floating in the middle of the
-	-- hall whenever a marker was off-centre or the hall ran the other way. Casting
-	-- to the real nearest wall guarantees the rig ends up against an actual surface.
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	local ignore: { Instance } = { folder }
-	for _, m in CollectionService:GetTagged(GameConfig.TAGS.LEAN_SPOT) do
-		table.insert(ignore, m)
-	end
-	rayParams.FilterDescendantsInstances = ignore
-
-	local DIRS = { Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1) }
-	local bestDist = math.huge
-	local wallDir: Vector3? = nil
-	local wallPos: Vector3? = nil
-	for _, d in DIRS do
-		local hit = workspace:Raycast(origin, d * 30, rayParams)
-		if hit and hit.Distance < bestDist then
-			bestDist = hit.Distance
-			wallDir = d
-			wallPos = hit.Position
-		end
-	end
-
-	local face: Vector3
-	local seatXZ: Vector2
-	if wallDir and wallPos then
-		face = -wallDir                   -- face AWAY from the wall, into the room
-		local seat = wallPos + face * 0.6 -- back flush against the wall
-		seatXZ = Vector2.new(seat.X, seat.Z)
-	else
-		-- truly no wall within range — keep the marker spot + its baked Face
-		face = (spot:GetAttribute("Face") :: Vector3?) or Vector3.new(1, 0, 0)
-		face = Vector3.new(face.X, 0, face.Z)
-		if face.Magnitude < 0.01 then face = Vector3.new(1, 0, 0) end
-		face = face.Unit
-		seatXZ = Vector2.new(pos.X, pos.Z)
-	end
-	local seatPos = Vector3.new(seatXZ.X, sitY, seatXZ.Y)
+	local face = -wallDir
+	local feet = V(wallPos.X, floorY, wallPos.Z) + face * FEET_OUT
 	local model, hum = RigFactory.create()
-	model:PivotTo(CFrame.lookAt(seatPos, seatPos + face))
+	RigFactory.applyHair(model, math.random(0, 999999))
+	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local rootH = hum.HipHeight + (if root then root.Size.Y / 2 else 1)
+	-- Pivot about the feet, tip the body back onto the wall, then stand it up.
+	model:PivotTo(CFrame.lookAt(feet, feet + face) * CFrame.Angles(LEAN_TILT, 0, 0) * CFrame.new(0, rootH, 0))
 	model.Parent = folder
-	RigFactory.sit(model, hum)
+	RigFactory.stand(model, hum)
 
-	-- Head down + slight forward lean so they're looking at the laptop on their lap.
-	local neck = motorIn(model, "Head", "Neck")
-	if neck then
-		neck.C0 = neck.C0 * CFrame.Angles(math.rad(30), 0, 0)
+	local which = math.random(#LEAN_POSES)
+	pose(model, LEAN_POSES[which])
+	if which == 1 then
+		task.defer(givePhone, model)
 	end
-	local waist = motorIn(model, "UpperTorso", "Waist")
-	if waist then
-		waist.C0 = waist.C0 * CFrame.Angles(math.rad(12), 0, 0)
-	end
-	-- Hands forward to hold the laptop.
-	local rS = motorIn(model, "RightUpperArm", "RightShoulder")
-	local lS = motorIn(model, "LeftUpperArm", "LeftShoulder")
-	if rS then
-		rS.C0 = rS.C0 * CFrame.Angles(math.rad(46), 0, 0)
-	end
-	if lS then
-		lS.C0 = lS.C0 * CFrame.Angles(math.rad(46), 0, 0)
-	end
-
-	-- Laptop open on their lap with the screen facing them. The template's neon
-	-- screen faces its local -Z, so (like the desk laptops) we spin it 180° to point
-	-- the screen back at the seated rig — placed just in front of and below the root.
-	local root = model.PrimaryPart
-	if root then
-		local laptop = AssetLibrary.clone("Laptop", root.CFrame * CFrame.new(0, -0.35, -1.05) * CFrame.Angles(0, math.rad(180), 0))
-		if laptop then
-			laptop.Parent = model
-		end
-	end
-
+	RigFactory.enableHeadTracking(model, hum)
 	table.insert(spawned, model)
 end
 
---- A hacker asleep sitting up on a lounge couch — slumped to one side, head lolled.
+--------------------------------------------------------------------------------
+-- Sleepers
+--------------------------------------------------------------------------------
+
+--- A hacker asleep sitting up on a lounge couch: slumped to one side, head
+--- lolled back.
 local function spawnCouchSleeper(seat: Part)
 	if couchSleeperCount >= MAX_COUCH_SLEEPERS then
 		return
 	end
 	couchSleeperCount += 1
 
-	-- The cushion Seat faces the way the couch faces (its LookVector), so sit them
-	-- looking out into the room.
+	-- The cushion Seat faces the way the couch faces (its LookVector).
 	local face = seat.CFrame.LookVector
-	face = Vector3.new(face.X, 0, face.Z)
+	face = V(face.X, 0, face.Z)
 	if face.Magnitude < 0.01 then
-		face = Vector3.new(0, 0, 1)
+		face = V(0, 0, 1)
 	end
 	face = face.Unit
 
 	-- Cushion top sits ~0.85 below where a seated rig's root wants to be.
-	local sitPos = seat.Position + Vector3.new(0, 0.85, 0)
+	local sitPos = seat.Position + V(0, 0.85, 0)
 	local model, hum = RigFactory.create()
+	RigFactory.applyHair(model, math.random(0, 999999))
 	model:PivotTo(CFrame.lookAt(sitPos, sitPos + face))
-	-- Anchor BEFORE parenting so the cushion Seat (a real Seat) doesn't auto-weld
-	-- the rig and yank it out of our slumped pose.
+	-- Anchor BEFORE parenting so the cushion Seat doesn't auto-weld the rig.
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.Anchored = true
@@ -318,22 +301,13 @@ local function spawnCouchSleeper(seat: Part)
 	model.Parent = folder
 	RigFactory.sit(model, hum)
 
-	-- Slumped sideways, head lolled back and to the side — fast asleep.
-	local lean = (math.random() < 0.5) and 1 or -1
-	local waist = motorIn(model, "UpperTorso", "Waist")
-	if waist then
-		waist.C0 = waist.C0 * CFrame.Angles(math.rad(-6), 0, math.rad(12 * lean))
-	end
-	local neck = motorIn(model, "Head", "Neck")
-	if neck then
-		neck.C0 = neck.C0 * CFrame.Angles(math.rad(-16), 0, math.rad(20 * lean))
-	end
-
+	local lean = if math.random() < 0.5 then 1 else -1
+	pose(model, { waist = V(-6, 0, 12 * lean), neck = V(-16, 0, 22 * lean), rS = V(8, 0, 6), lS = V(8, 0, -6) })
 	table.insert(spawned, model)
 end
 
---- A hacker crashed out in a sleeping bag on the floor. The bag's quilt hides the
---- lower body, so we just lay the rig on its back with its arms tucked in.
+--- A hacker crashed out in a sleeping bag on the floor. The bag's quilt hides
+--- the lower body, so the rig is laid flat with its face on the pillow.
 local function spawnSleepingBag(spot: Part)
 	if bagSleeperCount >= MAX_BAG_SLEEPERS then
 		return
@@ -350,29 +324,23 @@ local function spawnSleepingBag(spot: Part)
 		table.insert(spawned, bag)
 	end
 
-	-- Lay the rig flat along the bag, head/face toward the pillow end (-Z of the
-	-- bag). -90° about the bag's local X tips the standing rig down onto its front;
-	-- the quilt covers the body and the face rests on the pillow.
+	-- Lay the rig flat along the bag, head toward the pillow end (-Z of the bag).
 	local model = RigFactory.create()
-	local lieCF = bagCF * CFrame.new(0, 1.0, -1.4) * CFrame.Angles(math.rad(-90), 0, 0)
-	model:PivotTo(lieCF)
+	RigFactory.applyHair(model, math.random(0, 999999))
+	model:PivotTo(bagCF * CFrame.new(0, 1.0, -1.4) * CFrame.Angles(math.rad(-90), 0, 0))
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.Anchored = true
 	end
-	-- Arms down by the sides instead of the default A-pose.
-	local rS = motorIn(model, "RightUpperArm", "RightShoulder")
-	local lS = motorIn(model, "LeftUpperArm", "LeftShoulder")
-	if rS then
-		rS.C0 = rS.C0 * CFrame.Angles(0, 0, math.rad(-76))
-	end
-	if lS then
-		lS.C0 = lS.C0 * CFrame.Angles(0, 0, math.rad(76))
-	end
 	model.Parent = folder
-
+	-- one arm curled up under the pillow
+	pose(model, { neck = V(0, 30, 0), rS = V(150, 0, -10), rE = V(-70, 0, 0) })
 	table.insert(spawned, model)
 end
+
+--------------------------------------------------------------------------------
+-- Lifecycle
+--------------------------------------------------------------------------------
 
 local function populate()
 	-- shuffle desk seats so the cap spreads people across all floors
@@ -418,10 +386,15 @@ local function populate()
 		end
 	end
 
-	print(string.format(
-		"[AmbientPopulation] Placed %d seated + %d leaning + %d couch-sleepers + %d bag-sleepers",
-		seatedCount, leanerCount, couchSleeperCount, bagSleeperCount
-	))
+	print(
+		string.format(
+			"[AmbientPopulation] Placed %d seated + %d leaning + %d couch-sleepers + %d bag-sleepers",
+			seatedCount,
+			leanerCount,
+			couchSleeperCount,
+			bagSleeperCount
+		)
+	)
 end
 
 local function clearAll()
@@ -431,7 +404,6 @@ local function clearAll()
 		end
 	end
 	table.clear(spawned)
-	table.clear(animatedSeated)
 	print("[AmbientPopulation] Cleared ambient hackers (Night 2)")
 end
 

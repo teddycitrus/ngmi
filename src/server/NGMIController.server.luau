@@ -19,22 +19,23 @@ local PathfindingService   = game:GetService("PathfindingService")
 local Players              = game:GetService("Players")
 local ReplicatedStorage    = game:GetService("ReplicatedStorage")
 local RunService           = game:GetService("RunService")
+local ServerStorage        = game:GetService("ServerStorage")
 
 --------------------------------------------------------------------------------
 -- Shared Config
 --------------------------------------------------------------------------------
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local NGMIMutation = require(ReplicatedStorage.Shared.NGMIMutation)
 local BadgeManager = require(script.Parent:WaitForChild("BadgeManager"))
+local RigFactory = require(script.Parent:WaitForChild("RigFactory"))
 
 --------------------------------------------------------------------------------
 -- Remotes
 --------------------------------------------------------------------------------
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local GameStateChanged  = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 local PlayerDamaged     = Remotes:WaitForChild("PlayerDamaged")     :: RemoteEvent
 local DeodorantSpray    = Remotes:WaitForChild("DeodorantSpray")    :: RemoteEvent
 local NGMIStunned       = Remotes:WaitForChild("NGMIStunned")       :: RemoteEvent
-local HidingStateChanged = Remotes:WaitForChild("HidingStateChanged") :: RemoteEvent
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -70,6 +71,18 @@ local PATROL_PAUSE_MIN: number      = 2
 local PATROL_PAUSE_MAX: number      = 4
 local PATH_RECALC_INTERVAL: number  = 1   -- re-path every N seconds while chasing
 local ALERT_PAUSE: number           = 0.5 -- seconds of freeze on first detection
+
+-- Melee. Every attack is telegraphed: the NGMI winds up (clients animate it
+-- from the AttackKind / AttackSeq attributes), strikes, and only lands the hit
+-- if the target is still in reach a beat after the strike, so stepping back
+-- out of a swing or sidestepping a lunge actually works.
+local WINDUP: { [string]: number } = GameConfig.NGMI.attackWindup
+local STRIKE_DRIVE: { [string]: number } = GameConfig.NGMI.attackStrike
+local STRIKE_SPEED: { [string]: number } = { swipe_l = 16, swipe_r = 16, lunge = 44 }
+local HIT_REACH: number             = 1.25 -- x ATTACK_RANGE, measured after the strike
+local RECOVER_TIME: number          = 0.45
+local LUNGE_RANGE: number           = 10   -- may leap in from this far while chasing
+local LUNGE_CHANCE: number          = 1.1  -- per second, when in lunge range
 
 -- Difficulty scaling every 5 minutes of Night 2
 local DIFFICULTY_INTERVAL: number   = 300  -- 5 minutes
@@ -137,6 +150,12 @@ type NGMIData = {
 	-- Path
 	currentPath: Path?,
 	pathWaypointIndex: number,
+	-- Attack sequencing: nil when idle, else "windup" / "strike" / "recover"
+	attackPhase: string?,
+	attackKind: string,
+	attackTimer: number,
+	attackSeq: number,
+	forceLunge: boolean,
 }
 
 --------------------------------------------------------------------------------
@@ -158,8 +177,18 @@ local difficultyRange: number = 0
 local difficultyCooldownReduction: number = 0
 local lastDifficultyTier: number = 0
 
--- Track which players are currently hiding (server-authoritative via remote)
-local hidingPlayers: { [number]: boolean } = {}  -- UserId → true
+-- Weapon uses InventoryManager has confirmed (item, ammo and its use cooldown
+-- checked), waiting for the user's client to report what it hit. Each
+-- confirmed use allows exactly one DeodorantSpray hit, inside
+-- SPRAY_CLAIM_WINDOW seconds and within that weapon's reach.
+type ConfirmedUse = { at: number, reach: number }
+local confirmedSprays: { [Player]: ConfirmedUse } = {}
+local SPRAY_CLAIM_WINDOW = 2
+-- Reach from the user's root to the NGMI's root. Client targeting looks 22
+-- studs out (VFXManager); the slack covers the NGMI moving during the round
+-- trip. Melee (chair leg, plunger) has a stun radius of about 6 studs, so it
+-- only connects up close.
+local WEAPON_REACH: { [string]: number } = { spray = 30, melee = 12 }
 
 -- Track sprinting players for sound detection (set by external systems;
 -- here we infer from Humanoid.WalkSpeed > base walk speed)
@@ -232,7 +261,30 @@ end
 	- BillboardGui for overhead mumble/chase text
 	- Tagged with CollectionService 'NGMI'
 ]]
-local function createNGMIModel(spawnCFrame: CFrame): Model
+--[[
+	Join two parts with a Motor6D whose pivot sits `pivot` (in part1 space) away
+	from part1's centre, so a limb swings from the shoulder / hip / neck instead
+	of its middle. Motors rather than WeldConstraints so NGMIAnimator (client)
+	can pose the body. C0 edits made on a client never replicate, so each client
+	animates its own copy for free.
+]]
+local function motorJoint(name: string, part0: BasePart, part1: BasePart, pivot: Vector3): Motor6D
+	local pivotCF = part1.CFrame * CFrame.new(pivot)
+	local motor = Instance.new("Motor6D")
+	motor.Name = name
+	motor.Part0 = part0
+	motor.Part1 = part1
+	motor.C0 = part0.CFrame:ToObjectSpace(pivotCF)
+	motor.C1 = CFrame.new(pivot)
+	motor.Parent = part1
+	return motor
+end
+
+--[[
+	Legacy block NGMI, only used if the avatar API can't produce an R15 rig.
+	Joint names match R15 so NGMIAnimator still poses what it has.
+]]
+local function createBlockNGMIModel(spawnCFrame: CFrame): Model
 	-- Build a rig from scratch (R15-style simplified)
 	local model = Instance.new("Model")
 	model.Name = "NGMI"
@@ -258,10 +310,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	upperTorso.Material = Enum.Material.SmoothPlastic
 	upperTorso.Parent = model
 
-	local torsoWeld = Instance.new("WeldConstraint")
-	torsoWeld.Part0 = torso
-	torsoWeld.Part1 = upperTorso
-	torsoWeld.Parent = upperTorso
+	motorJoint("Waist", torso, upperTorso, Vector3.new(0, -0.8, 0))
 
 	-- Head
 	local head = Instance.new("Part")
@@ -275,10 +324,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	head.Material = Enum.Material.SmoothPlastic
 	head.Parent = model
 
-	local headWeld = Instance.new("WeldConstraint")
-	headWeld.Part0 = upperTorso
-	headWeld.Part1 = head
-	headWeld.Parent = head
+	motorJoint("Neck", upperTorso, head, Vector3.new(0, -0.8, 0))
 
 	-- Face (required for Humanoid to work properly)
 	local face = Instance.new("Decal")
@@ -330,10 +376,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	leftArm.Material = Enum.Material.Slate -- tattered appearance
 	leftArm.Parent = model
 
-	local leftArmWeld = Instance.new("WeldConstraint")
-	leftArmWeld.Part0 = upperTorso
-	leftArmWeld.Part1 = leftArm
-	leftArmWeld.Parent = leftArm
+	motorJoint("LeftShoulder", upperTorso, leftArm, Vector3.new(0, 0.9, 0))
 
 	local rightArm = Instance.new("Part")
 	rightArm.Name = "RightUpperArm"
@@ -345,10 +388,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	rightArm.Material = Enum.Material.Slate
 	rightArm.Parent = model
 
-	local rightArmWeld = Instance.new("WeldConstraint")
-	rightArmWeld.Part0 = upperTorso
-	rightArmWeld.Part1 = rightArm
-	rightArmWeld.Parent = rightArm
+	motorJoint("RightShoulder", upperTorso, rightArm, Vector3.new(0, 0.9, 0))
 
 	-- Legs
 	local leftLeg = Instance.new("Part")
@@ -361,10 +401,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	leftLeg.Material = Enum.Material.Slate
 	leftLeg.Parent = model
 
-	local leftLegWeld = Instance.new("WeldConstraint")
-	leftLegWeld.Part0 = torso
-	leftLegWeld.Part1 = leftLeg
-	leftLegWeld.Parent = leftLeg
+	motorJoint("LeftHip", torso, leftLeg, Vector3.new(0, 0.9, 0))
 
 	local rightLeg = Instance.new("Part")
 	rightLeg.Name = "RightUpperLeg"
@@ -376,10 +413,7 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	rightLeg.Material = Enum.Material.Slate
 	rightLeg.Parent = model
 
-	local rightLegWeld = Instance.new("WeldConstraint")
-	rightLegWeld.Part0 = torso
-	rightLegWeld.Part1 = rightLeg
-	rightLegWeld.Parent = rightLeg
+	motorJoint("RightHip", torso, rightLeg, Vector3.new(0, 0.9, 0))
 
 	-- Humanoid
 	local humanoid = Instance.new("Humanoid")
@@ -424,6 +458,66 @@ local function createNGMIModel(spawnCFrame: CFrame): Model
 	return model
 end
 
+--[[
+	The real NGMI: a venue avatar rig run through the same mutation the night
+	transition cutscene uses, so the things hunting you are the hackers you
+	watched turn. Full R15 limbs (elbows, knees, hands) give NGMIAnimator
+	something to stagger, lunge and swipe with.
+]]
+local function createNGMIModel(spawnCFrame: CFrame): Model
+	local model, humanoid = RigFactory.create()
+	if not model:FindFirstChild("UpperTorso") then
+		model:Destroy()
+		return createBlockNGMIModel(spawnCFrame)
+	end
+	model.Name = "NGMI"
+	NGMIMutation.apply(model, math.random(1, 1000000))
+
+	humanoid.MaxHealth = math.huge -- NGMIs cannot be killed
+	humanoid.Health = math.huge
+	humanoid.WalkSpeed = getEffectiveSpeed()
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.BreakJointsOnDeath = false
+
+	local head = model:FindFirstChild("Head") :: BasePart
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "OverheadGui"
+	billboard.Size = UDim2.new(8, 0, 2, 0)
+	billboard.StudsOffset = Vector3.new(0, 3.5, 0)
+	billboard.Adornee = head
+	billboard.AlwaysOnTop = false
+	billboard.MaxDistance = 60
+	billboard.Parent = model
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Name = "MumbleText"
+	textLabel.Size = UDim2.new(1, 0, 1, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.TextColor3 = Color3.fromRGB(200, 50, 50)
+	textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	textLabel.TextStrokeTransparency = 0.3
+	textLabel.Font = Enum.Font.Code
+	textLabel.TextScaled = true
+	textLabel.Text = ""
+	textLabel.TextTransparency = 1
+	textLabel.Parent = billboard
+
+	model:PivotTo(spawnCFrame + Vector3.new(0, 1.5, 0))
+	CollectionService:AddTag(model, "NGMI")
+	model.Parent = workspace
+
+	-- Server-owned physics, so the lunge impulse and facing writes land on the
+	-- authoritative copy instead of a nearby player's simulation.
+	local root = model:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		pcall(function()
+			root:SetNetworkOwner(nil)
+		end)
+	end
+
+	return model
+end
+
 --------------------------------------------------------------------------------
 -- NGMI Entity Registration
 --------------------------------------------------------------------------------
@@ -456,9 +550,15 @@ local function registerNGMI(model: Model): NGMIData
 		mumbleTimer = math.random(3, 6),
 		currentPath = nil,
 		pathWaypointIndex = 1,
+		attackPhase = nil,
+		attackKind = "swipe_r",
+		attackTimer = 0,
+		attackSeq = 0,
+		forceLunge = false,
 	}
 
 	ngmiEntities[model] = data
+	model:SetAttribute("AIState", data.state)
 	return data
 end
 
@@ -531,7 +631,8 @@ end
 
 --[[ Check if a player is hiding. ]]
 local function isPlayerHiding(player: Player): boolean
-	return hidingPlayers[player.UserId] == true
+	-- Set only by InteractionManager's hiding-spot prompt (server side).
+	return player:GetAttribute("Hiding") == true
 end
 
 --[[
@@ -652,7 +753,7 @@ local function navigateTo(ngmi: NGMIData, targetPos: Vector3): ()
 		AgentCanClimb = false,
 	})
 
-	local ok, err = pcall(function()
+	local ok = pcall(function()
 		path:ComputeAsync(ngmi.rootPart.Position, targetPos)
 	end)
 
@@ -706,9 +807,15 @@ end
 
 local function transitionTo(ngmi: NGMIData, newState: AIState, target: Player?): ()
 	ngmi.state = newState
+	-- Replicated so NGMIAnimator (client) can switch body language per state.
+	ngmi.model:SetAttribute("AIState", newState)
 	ngmi.stateTimer = 0
 	ngmi.targetPlayer = target
 	ngmi.currentPath = nil
+	if newState ~= "ATTACK" then
+		ngmi.attackPhase = nil
+		ngmi.forceLunge = false
+	end
 
 	if newState == "PATROL" then
 		ngmi.humanoid.WalkSpeed = getEffectiveSpeed()
@@ -865,6 +972,14 @@ local function updateChase(ngmi: NGMIData, dt: number): ()
 		return
 	end
 
+	-- Clicker leap: from a few strides out, sometimes launch straight at them.
+	if dist <= LUNGE_RANGE and ngmi.attackCooldown <= 0 and math.random() < LUNGE_CHANCE * dt
+		and hasLineOfSight(ngmi, targetRoot.Position) then
+		transitionTo(ngmi, "ATTACK", target)
+		ngmi.forceLunge = true
+		return
+	end
+
 	-- If target is hiding and out of close range, lose them
 	if isPlayerHiding(target) and dist > HIDING_DETECT_RANGE then
 		transitionTo(ngmi, "LOST", target)
@@ -901,9 +1016,34 @@ local function updateChase(ngmi: NGMIData, dt: number): ()
 	end
 end
 
-local function updateAttack(ngmi: NGMIData, dt: number): ()
-	ngmi.attackCooldown -= dt
+local function startAttack(ngmi: NGMIData, dist: number)
+	local kind: string
+	if ngmi.forceLunge or (dist > ATTACK_RANGE * 0.7 and math.random() < 0.5) then
+		kind = "lunge"
+	else
+		kind = if math.random() < 0.5 then "swipe_l" else "swipe_r"
+	end
+	ngmi.forceLunge = false
+	ngmi.attackKind = kind
+	ngmi.attackPhase = "windup"
+	ngmi.attackTimer = WINDUP[kind]
+	ngmi.attackSeq += 1
+	ngmi.model:SetAttribute("AttackKind", kind)
+	ngmi.model:SetAttribute("AttackSeq", ngmi.attackSeq)
+end
 
+local function landHit(ngmi: NGMIData, target: Player, targetHumanoid: Humanoid)
+	PlayerDamaged:FireClient(target, BASE_DAMAGE, ngmi.model)
+	-- Tag the cause so the death screen shows the right message, then apply
+	-- damage to their Humanoid directly (server-authoritative).
+	target:SetAttribute("DeathCause", "ngmi")
+	targetHumanoid:TakeDamage(BASE_DAMAGE)
+	if targetHumanoid.Health <= 0 then
+		BadgeManager.award(target, GameConfig.BADGES.deathByNGMI)
+	end
+end
+
+local function updateAttack(ngmi: NGMIData, dt: number): ()
 	local target = ngmi.targetPlayer
 	if not target then
 		transitionTo(ngmi, "PATROL", nil)
@@ -926,36 +1066,61 @@ local function updateAttack(ngmi: NGMIData, dt: number): ()
 		return
 	end
 
-	local dist = (ngmi.rootPart.Position - targetRoot.Position).Magnitude
+	local toTarget = targetRoot.Position - ngmi.rootPart.Position
+	local dist = toTarget.Magnitude
 
-	-- If out of attack range, resume chase
-	if dist > ATTACK_RANGE * 1.5 then
+	local function faceTarget()
+		local flat = Vector3.new(toTarget.X, 0, toTarget.Z)
+		if flat.Magnitude > 0.05 then
+			ngmi.rootPart.CFrame = CFrame.lookAt(ngmi.rootPart.Position, ngmi.rootPart.Position + flat)
+		end
+	end
+
+	if ngmi.attackPhase == "windup" then
+		-- Coiled, tracking the target, committed to the swing.
+		faceTarget()
+		ngmi.attackTimer -= dt
+		if ngmi.attackTimer <= 0 then
+			ngmi.attackPhase = "strike"
+			ngmi.attackTimer = STRIKE_DRIVE[ngmi.attackKind]
+			-- Drive through the strike: a burst of speed toward where they are.
+			ngmi.humanoid.WalkSpeed = STRIKE_SPEED[ngmi.attackKind]
+			ngmi.humanoid:MoveTo(targetRoot.Position)
+			if ngmi.attackKind == "lunge" then
+				ngmi.rootPart.AssemblyLinearVelocity = toTarget.Unit * STRIKE_SPEED.lunge + Vector3.new(0, 9, 0)
+			end
+		end
+		return
+	elseif ngmi.attackPhase == "strike" then
+		ngmi.attackTimer -= dt
+		if ngmi.attackTimer <= 0 then
+			ngmi.humanoid.WalkSpeed = 0
+			ngmi.humanoid:MoveTo(ngmi.rootPart.Position)
+			if dist <= ATTACK_RANGE * HIT_REACH then
+				landHit(ngmi, target, targetHumanoid)
+			end
+			ngmi.attackPhase = "recover"
+			ngmi.attackTimer = RECOVER_TIME
+		end
+		return
+	elseif ngmi.attackPhase == "recover" then
+		ngmi.attackTimer -= dt
+		if ngmi.attackTimer <= 0 then
+			ngmi.attackPhase = nil
+			ngmi.attackCooldown = getEffectiveAttackCooldown()
+		end
+		return
+	end
+
+	-- Between attacks: break off to chase if they got away.
+	if dist > ATTACK_RANGE * 1.5 and not ngmi.forceLunge then
 		transitionTo(ngmi, "CHASE", target)
 		return
 	end
 
-	-- Face the target
-	local lookCF = CFrame.lookAt(ngmi.rootPart.Position, targetRoot.Position)
-	ngmi.rootPart.CFrame = CFrame.new(ngmi.rootPart.Position) * lookCF.Rotation
-
-	-- Attack on cooldown
+	faceTarget()
 	if ngmi.attackCooldown <= 0 then
-		ngmi.attackCooldown = getEffectiveAttackCooldown()
-
-		-- Lunge forward animation: brief impulse toward player
-		local lungeDir = (targetRoot.Position - ngmi.rootPart.Position).Unit
-		ngmi.rootPart.AssemblyLinearVelocity = lungeDir * 20 + Vector3.new(0, 5, 0)
-
-		-- Deal damage via remote
-		PlayerDamaged:FireClient(target, BASE_DAMAGE, ngmi.model)
-
-		-- Tag the cause so the death screen shows the right message, then apply
-		-- damage to their Humanoid directly (server-authoritative).
-		target:SetAttribute("DeathCause", "ngmi")
-		targetHumanoid:TakeDamage(BASE_DAMAGE)
-		if targetHumanoid.Health <= 0 then
-			BadgeManager.award(target, GameConfig.BADGES.deathByNGMI)
-		end
+		startAttack(ngmi, dist)
 	end
 end
 
@@ -1108,7 +1273,9 @@ local function spawnWave(count: number): ()
 		-- count active
 		(function()
 			local n = 0
-			for _ in ngmiEntities do n += 1 end
+			for _ in ngmiEntities do
+				n += 1
+			end
 			return n
 		end)()
 	))
@@ -1229,7 +1396,6 @@ end
 -- (ServerStorage.ServerComm.PhaseChanged). RemoteEvent.OnServerEvent cannot be
 -- used here because the authority is the server, not a client.
 do
-	local ServerStorage = game:GetService("ServerStorage")
 	local serverComm = ServerStorage:WaitForChild("ServerComm")
 	local phaseBus = serverComm:WaitForChild("PhaseChanged") :: BindableEvent
 	phaseBus.Event:Connect(function(phase: number)
@@ -1241,12 +1407,40 @@ do
 	end)
 end
 
--- Deodorant stun: when a player sprays an NGMI, stun it
+-- InventoryManager fires WeaponUsed after it has spent the spray's ammo.
+do
+	local serverComm = ServerStorage:FindFirstChild("ServerComm")
+	if not serverComm then
+		serverComm = Instance.new("Folder")
+		serverComm.Name = "ServerComm"
+		serverComm.Parent = ServerStorage
+	end
+	local bus = serverComm:FindFirstChild("WeaponUsed")
+	if not (bus and bus:IsA("BindableEvent")) then
+		bus = Instance.new("BindableEvent")
+		bus.Name = "WeaponUsed"
+		bus.Parent = serverComm
+	end
+	;(bus :: BindableEvent).Event:Connect(function(player: Player, _itemId: string, kind: string)
+		local reach = WEAPON_REACH[kind]
+		if reach and typeof(player) == "Instance" and player:IsA("Player") then
+			confirmedSprays[player] = { at = os.clock(), reach = reach }
+		end
+	end)
+end
+
+-- Deodorant stun: the user's client reports which NGMI its spray or melee swing
+-- hit. The client only picks the target; the hit counts only against a use the
+-- server confirmed, once per use, and only within that weapon's reach.
 DeodorantSpray.OnServerEvent:Connect(function(player: Player, targetModel: Instance?)
 	if not isNight2Active then
 		return
 	end
-	if not targetModel or not targetModel:IsA("Model") then
+	local use = confirmedSprays[player]
+	if not use or os.clock() - use.at > SPRAY_CLAIM_WINDOW then
+		return
+	end
+	if typeof(targetModel) ~= "Instance" or not targetModel:IsA("Model") then
 		return
 	end
 
@@ -1254,6 +1448,12 @@ DeodorantSpray.OnServerEvent:Connect(function(player: Player, targetModel: Insta
 	if not data then
 		return
 	end
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not (root and root:IsA("BasePart")) or (root.Position - data.rootPart.Position).Magnitude > use.reach then
+		return
+	end
+	confirmedSprays[player] = nil
 
 	-- Each spray deals 1/8 of the NGMI's health and sends it fleeing.
 	data.health -= 1
@@ -1292,14 +1492,8 @@ DeodorantSpray.OnServerEvent:Connect(function(player: Player, targetModel: Insta
 	print(("[NGMIController] NGMI sprayed by %s (%d/%d left)"):format(player.Name, data.health, data.maxHealth))
 end)
 
--- Track hiding state changes
-HidingStateChanged.OnServerEvent:Connect(function(player: Player, isHiding: boolean)
-	hidingPlayers[player.UserId] = isHiding or nil
-end)
-
--- Clean up hiding state when players leave
 Players.PlayerRemoving:Connect(function(player: Player)
-	hidingPlayers[player.UserId] = nil
+	confirmedSprays[player] = nil
 end)
 
 --------------------------------------------------------------------------------

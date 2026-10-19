@@ -11,12 +11,19 @@ local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local NGMIStunned = Remotes:WaitForChild("NGMIStunned") :: RemoteEvent
 local PlayerDied = Remotes:WaitForChild("PlayerDied") :: RemoteEvent
 local PlayerRespawn = Remotes:WaitForChild("PlayerRespawn") :: RemoteEvent
 local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
+
+-- Optional: a broken module must never take the proximity horror down with it.
+local cinematicOk, cinematicModule = pcall(function()
+    return require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CinematicCamera"))
+end)
+local CinematicCamera = if cinematicOk then cinematicModule else nil
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -115,10 +122,43 @@ end
 -- ============================================================
 local jumpScareGui: ScreenGui? = nil
 
+-- VFXManager publishes its effect API as BindableEvents parented to its own
+-- script (a LocalScript can't be require()d). Resolved lazily and cached so load
+-- order between the two scripts doesn't matter, and so a missing VFXManager
+-- degrades to "no shake" instead of erroring mid-scare.
+local vfxJumpScare: BindableEvent? = nil
+local vfxLookedUp = false
+
+local function getVfxJumpScare(): BindableEvent?
+    if vfxLookedUp then
+        return vfxJumpScare
+    end
+    vfxLookedUp = true
+    local manager = script.Parent and script.Parent:FindFirstChild("VFXManager")
+    local bus = manager and manager:FindFirstChild("VFXJumpScare")
+    if bus and bus:IsA("BindableEvent") then
+        vfxJumpScare = bus
+    end
+    return vfxJumpScare
+end
+
 local function triggerJumpScare()
     if isDead then return end
     if tick() - lastJumpScareTime < 8 then return end -- 8s cooldown
     lastJumpScareTime = tick()
+
+    -- Throw the camera as the face hits. CinematicCamera.jumpscare slams the FOV,
+    -- tears the image with chromatic aberration, and fires VFXManager's Perlin
+    -- trauma + bloom pulse + static, so the scare is one gesture. Fall back to
+    -- the bare VFX bus if the module failed to load.
+    if CinematicCamera then
+        CinematicCamera.jumpscare(1)
+    else
+        local bus = getVfxJumpScare()
+        if bus then
+            bus:Fire(1)
+        end
+    end
 
     if jumpScareGui then jumpScareGui:Destroy() end
 
@@ -134,7 +174,7 @@ local function triggerJumpScare()
     face.Position = UDim2.new(0.2, 0, 0.2, 0)
     face.BackgroundTransparency = 1 -- no ugly box around the eye
     face.TextColor3 = Color3.fromRGB(255, 0, 0)
-    face.Font = Enum.Font.Creepster
+    face.FontFace = UITheme.Font.Bold
     face.TextSize = 180
     face.Text = "👁️"
     face.TextTransparency = 0
@@ -146,19 +186,6 @@ local function triggerJumpScare()
     static.BackgroundColor3 = Color3.new(1, 1, 1)
     static.BackgroundTransparency = 0.85
     static.Parent = jumpScareGui
-
-    -- Screen shake
-    task.spawn(function()
-        for _ = 1, 6 do
-            local shake = CFrame.Angles(
-                math.rad(math.random(-5, 5)),
-                math.rad(math.random(-5, 5)),
-                math.rad(math.random(-2, 2))
-            )
-            camera.CFrame = camera.CFrame * shake
-            task.wait(0.03)
-        end
-    end)
 
     -- Remove after 0.15s
     task.delay(0.15, function()
@@ -211,24 +238,13 @@ local function setupNGMIVisuals(ngmi: Model)
         emitter.Parent = torso
     end
 
-    -- Flickering eye effect
+    -- Flickering eye effect. Body twitching lives in NGMIAnimator, which poses
+    -- the Motor6D joints; moving a part's CFrame here would yank the whole
+    -- assembly instead.
     task.spawn(function()
         while ngmi.Parent and isNight2 do
             if eyeLight.Parent then
                 eyeLight.Brightness = math.random(1, 5)
-            end
-            -- Random body twitch
-            if torso and torso:IsA("BasePart") then
-                local originalCF = torso.CFrame
-                torso.CFrame = originalCF * CFrame.Angles(
-                    math.rad(math.random(-3, 3)),
-                    math.rad(math.random(-2, 2)),
-                    math.rad(math.random(-2, 2))
-                )
-                task.wait(0.05)
-                if torso.Parent then
-                    torso.CFrame = originalCF
-                end
             end
             task.wait(math.random() * 0.8 + 0.3)
         end
@@ -287,6 +303,12 @@ local function startProximityTracking()
 
         -- Apply effects based on distance
         local dist = nearestNGMIDistance
+
+        -- Publish it: HUDController drives its heartbeat vignette off this rather
+        -- than running a second CollectionService scan over every NGMI each frame.
+        -- Capped rather than math.huge: an infinite attribute value is asking for
+        -- trouble at the replication boundary, and "very far" is all readers need.
+        player:SetAttribute("NGMIDistance", math.min(dist, 9999))
 
         if dist < 50 then
             -- Vignette (50-0 studs)
@@ -404,7 +426,7 @@ local function showDeathScreen()
     errorTitle.Size = UDim2.new(0.8, 0, 0.08, 0)
     errorTitle.Position = UDim2.new(0.1, 0, 0.25, 0)
     errorTitle.BackgroundTransparency = 1
-    errorTitle.Font = Enum.Font.Code
+    errorTitle.FontFace = UITheme.Font.Mono
     errorTitle.TextSize = 36
     errorTitle.TextColor3 = Color3.fromRGB(0, 255, 0)
     errorTitle.Text = "CRITICAL_EXCEPTION: PLAYER_NGMI"
@@ -416,7 +438,7 @@ local function showDeathScreen()
     stackTrace.Size = UDim2.new(0.8, 0, 0.2, 0)
     stackTrace.Position = UDim2.new(0.1, 0, 0.35, 0)
     stackTrace.BackgroundTransparency = 1
-    stackTrace.Font = Enum.Font.Code
+    stackTrace.FontFace = UITheme.Font.Mono
     stackTrace.TextSize = 20
     stackTrace.TextColor3 = Color3.fromRGB(0, 200, 0)
     stackTrace.TextXAlignment = Enum.TextXAlignment.Left
@@ -437,7 +459,7 @@ local function showDeathScreen()
     countdownLabel.Size = UDim2.new(0.8, 0, 0.06, 0)
     countdownLabel.Position = UDim2.new(0.1, 0, 0.6, 0)
     countdownLabel.BackgroundTransparency = 1
-    countdownLabel.Font = Enum.Font.Code
+    countdownLabel.FontFace = UITheme.Font.Mono
     countdownLabel.TextSize = 24
     countdownLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
     countdownLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -516,7 +538,7 @@ NGMIStunned.OnClientEvent:Connect(function(ngmiModel: Model)
             local stunLabel = Instance.new("TextLabel")
             stunLabel.Size = UDim2.new(1, 0, 1, 0)
             stunLabel.BackgroundTransparency = 1
-            stunLabel.Font = Enum.Font.Cartoon
+            stunLabel.FontFace = UITheme.Font.Bold
             stunLabel.TextSize = 24
             stunLabel.TextColor3 = Color3.fromRGB(150, 255, 150)
             stunLabel.TextStrokeTransparency = 0.5
