@@ -7,9 +7,11 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
+local Rig = require(script.Parent:WaitForChild("Flashlight"):WaitForChild("Rig"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local FlashlightToggle = Remotes:WaitForChild("FlashlightToggle") :: RemoteEvent
@@ -23,18 +25,21 @@ local playerGui = player:WaitForChild("PlayerGui")
 -- CONFIGURATION
 -- ============================================================
 local CONFIG = {
-    spotAngle = 45,
-    spotRange = 42,
-    brightness = 2,
-    color = Color3.fromRGB(255, 245, 225),
-    batteryMax = 100,
-    -- A full charge lasts 80 seconds (100 / 1.25). There is NO passive
-    -- recharge — the only way to top up is to consume a Battery item.
-    drainRate = 100 / 80, -- per second when on → 80s of light on a full charge
-    lowBatteryThreshold = 20,
-    reactivateThreshold = 10,
-    emfInterferenceRange = 20,
-    toggleKey = Enum.KeyCode.F,
+	spotAngle = 45,
+	spotRange = 42,
+	brightness = 2,
+	color = Color3.fromRGB(255, 245, 225),
+	batteryMax = 100,
+	-- A full charge lasts 80 seconds (100 / 1.25). There is NO passive
+	-- recharge, the only way to top up is to consume a Battery item.
+	drainRate = 100 / 80, -- per second when on → 80s of light on a full charge
+	lowBatteryThreshold = 20,
+	reactivateThreshold = 10,
+	emfInterferenceRange = 25,
+	-- How solid the visible shaft is at its source. Subtle on purpose; a dense
+	-- cone reads as fog rather than a torch.
+	coneTransparency = 0.9,
+	toggleKey = Enum.KeyCode.F,
 }
 
 -- ============================================================
@@ -45,388 +50,371 @@ local flashlightOn = false
 local battery = CONFIG.batteryMax
 local batteryDead = false
 local spotlight: SpotLight? = nil
+local blinkUntil = 0 -- os.clock() until which a battery blink holds the light dark
+local coneBeam: Beam? = nil
 local emitterPart: Part? = nil
-local renderConn: RBXScriptConnection? = nil
 local updateConnection: RBXScriptConnection? = nil
 local mobileButton: TextButton? = nil
-local batteryBar: Frame? = nil
 local batteryFill: Frame? = nil
+local batteryValue: TextLabel? = nil
 
 -- Forward declaration: toggleFlashlight is defined below but referenced by the
 -- UI button handlers created above it.
 local toggleFlashlight: () -> ()
 
 -- ============================================================
--- FLASHLIGHT RIG (camera-tracked SpotLight)
+-- FLASHLIGHT RIG (Flashlight/Rig)
 -- ============================================================
--- A first-person flashlight should light the cone the player is facing, originating
--- from them. We track a tiny invisible part to the camera each frame and hang a
--- SpotLight off it — the SpotLight casts exactly that cone of illumination (no
--- particles), aimed wherever the player looks (pitch included).
 local function destroyRig()
-    if renderConn then
-        renderConn:Disconnect()
-        renderConn = nil
-    end
-    if emitterPart then
-        emitterPart:Destroy()
-        emitterPart = nil
-    end
-    spotlight = nil
+	Rig.destroy()
+	emitterPart, spotlight, coneBeam = nil, nil, nil
 end
 
 local function createRig()
-    destroyRig()
-
-    local e = Instance.new("Part")
-    e.Name = "FlashlightEmitter"
-    e.Size = Vector3.new(0.2, 0.2, 0.2)
-    e.Transparency = 1
-    e.Anchored = true
-    e.CanCollide = false
-    e.CanQuery = false -- never block raycasts (wall checks, NGMI vision, etc.)
-    e.CanTouch = false
-    e.CastShadow = false
-    e.Parent = workspace
-    emitterPart = e
-
-    -- A SpotLight casts exactly the cone of illumination we want — origin at the
-    -- emitter, fanning out along its front face. No visible particles; it just lights
-    -- whatever surfaces fall inside the cone.
-    local light = Instance.new("SpotLight")
-    light.Name = "PhoneFlashlight"
-    light.Angle = CONFIG.spotAngle
-    light.Range = CONFIG.spotRange
-    light.Brightness = CONFIG.brightness
-    light.Color = CONFIG.color
-    light.Face = Enum.NormalId.Front
-    light.Enabled = false
-    light.Parent = e
-    spotlight = light
-
-    -- Track the camera every frame so the cone points exactly where the player looks,
-    -- nudged forward + down so it reads as a held light originating from the player.
-    renderConn = RunService.RenderStepped:Connect(function()
-        local cam = workspace.CurrentCamera
-        if emitterPart and cam then
-            emitterPart.CFrame = cam.CFrame * CFrame.new(0.4, -0.6, -1)
-        end
-    end)
+	local parts = Rig.create(CONFIG, function()
+		return flashlightOn
+	end)
+	emitterPart, spotlight, coneBeam = parts.emitter, parts.light, parts.cone
 end
 
 -- ============================================================
 -- MOBILE UI
 -- ============================================================
-local function createMobileUI()
-    if not UserInputService.TouchEnabled then return end
-
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "FlashlightUI"
-    gui.DisplayOrder = 20
-    gui.ResetOnSpawn = false
-    gui.Parent = playerGui
-
-    -- Toggle button
-    mobileButton = Instance.new("TextButton")
-    mobileButton.Name = "FlashlightToggle"
-    mobileButton.Size = UDim2.new(0, 56, 0, 56)
-    mobileButton.Position = UDim2.new(0, 16, 1, -180)
-    mobileButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-    mobileButton.Text = "🔦"
-    mobileButton.TextSize = 28
-    mobileButton.Font = Enum.Font.GothamBold
-    mobileButton.TextColor3 = Color3.new(1, 1, 1)
-    mobileButton.Parent = gui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 12)
-    corner.Parent = mobileButton
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(80, 80, 100)
-    stroke.Thickness = 2
-    stroke.Parent = mobileButton
-
-    -- Battery indicator bar under button
-    batteryBar = Instance.new("Frame")
-    batteryBar.Name = "BatteryBar"
-    batteryBar.Size = UDim2.new(0, 56, 0, 6)
-    batteryBar.Position = UDim2.new(0, 16, 1, -120)
-    batteryBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    batteryBar.BorderSizePixel = 0
-    batteryBar.Parent = gui
-
-    local barCorner = Instance.new("UICorner")
-    barCorner.CornerRadius = UDim.new(0, 3)
-    barCorner.Parent = batteryBar
-
-    batteryFill = Instance.new("Frame")
-    batteryFill.Name = "Fill"
-    batteryFill.Size = UDim2.new(1, 0, 1, 0)
-    batteryFill.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
-    batteryFill.BorderSizePixel = 0
-    batteryFill.Parent = batteryBar
-
-    local fillCorner = Instance.new("UICorner")
-    fillCorner.CornerRadius = UDim.new(0, 3)
-    fillCorner.Parent = batteryFill
-
-    mobileButton.Activated:Connect(function()
-        toggleFlashlight()
-    end)
+local function setMobileButtonState(state: "off" | "on" | "dead")
+	if not mobileButton then
+		return
+	end
+	if state == "on" then
+		mobileButton.BackgroundColor3 = UITheme.Color.Text
+		mobileButton.BackgroundTransparency = 0.1
+		mobileButton.TextColor3 = UITheme.Color.Surface
+	else
+		mobileButton.BackgroundColor3 = UITheme.Color.Surface
+		mobileButton.BackgroundTransparency = UITheme.Alpha.Surface
+		mobileButton.TextColor3 = if state == "dead" then UITheme.Color.Danger else UITheme.Color.Text
+	end
 end
 
--- Also create battery bar for PC
+local function createMobileUI()
+	if not UserInputService.TouchEnabled or mobileButton then
+		return
+	end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "FlashlightUI"
+	gui.DisplayOrder = 20
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.Parent = playerGui
+
+	local btn = Instance.new("TextButton")
+	btn.Name = "FlashlightToggle"
+	btn.AutoButtonColor = false
+	btn.AnchorPoint = Vector2.new(0, 1)
+	btn.Size = UDim2.fromOffset(52, 52)
+	btn.Position = UDim2.new(0, UITheme.Margin, 1, -(UITheme.Margin + 72))
+	btn.BorderSizePixel = 0
+	btn.Text = "LIGHT"
+	btn.TextSize = 11
+	btn.FontFace = UITheme.Font.Bold
+	btn.Parent = gui
+	UITheme.corner(btn, 26)
+	UITheme.outline(btn)
+	mobileButton = btn
+	setMobileButtonState("off")
+
+	btn.Activated:Connect(function()
+		toggleFlashlight()
+	end)
+end
+
+-- Battery meter for every platform, stacked above StaminaController's energy
+-- meter in the bottom-left corner.
 local function createBatteryUI()
-    local gui = playerGui:FindFirstChild("FlashlightUI")
-    if not gui then
-        gui = Instance.new("ScreenGui")
-        gui.Name = "FlashlightUI"
-        gui.DisplayOrder = 20
-        gui.ResetOnSpawn = false
-        gui.Parent = playerGui
-    end
+	local gui = playerGui:FindFirstChild("FlashlightUI") :: ScreenGui?
+	if not gui then
+		gui = Instance.new("ScreenGui")
+	end
+	local flashGui = gui :: ScreenGui
+	flashGui.Name = "FlashlightUI"
+	flashGui.DisplayOrder = 20
+	flashGui.ResetOnSpawn = false
+	flashGui.IgnoreGuiInset = true
+	flashGui.Enabled = true
+	flashGui.Parent = playerGui
 
-    if not batteryBar then
-        batteryBar = Instance.new("Frame")
-        batteryBar.Name = "BatteryBar"
-        batteryBar.Size = UDim2.new(0, 120, 0, 8)
-        -- Sit ABOVE the energy bar (bottom-left, ~60px tall) so they don't overlap
-        batteryBar.Position = UDim2.new(0, 16, 1, -78)
-        batteryBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-        batteryBar.BorderSizePixel = 0
-        batteryBar.Parent = gui
-
-        local barCorner = Instance.new("UICorner")
-        barCorner.CornerRadius = UDim.new(0, 4)
-        barCorner.Parent = batteryBar
-
-        batteryFill = Instance.new("Frame")
-        batteryFill.Name = "Fill"
-        batteryFill.Size = UDim2.new(1, 0, 1, 0)
-        batteryFill.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
-        batteryFill.BorderSizePixel = 0
-        batteryFill.Parent = batteryBar
-
-        local fillCorner = Instance.new("UICorner")
-        fillCorner.CornerRadius = UDim.new(0, 4)
-        fillCorner.Parent = batteryFill
-
-        -- Label
-        local label = Instance.new("TextLabel")
-        label.Name = "Label"
-        label.Size = UDim2.new(0, 120, 0, 16)
-        label.Position = UDim2.new(0, 16, 1, -96)
-        label.BackgroundTransparency = 1
-        label.Font = Enum.Font.Code
-        label.TextSize = 12
-        label.TextColor3 = Color3.fromRGB(200, 200, 200)
-        label.TextXAlignment = Enum.TextXAlignment.Left
-        label.Text = "🔦 BATTERY"
-        label.Parent = gui
-    end
+	if not batteryFill then
+		local meter = UITheme.meter(flashGui, "Battery", 180)
+		meter.root.Name = "BatteryMeter"
+		meter.root.AnchorPoint = Vector2.new(0, 1)
+		meter.root.Position = UDim2.new(0, UITheme.Margin, 1, -(UITheme.Margin + 34))
+		batteryValue = meter.value
+		batteryFill = meter.fill
+	end
 end
 
 -- ============================================================
 -- TOGGLE LOGIC
 -- ============================================================
 function toggleFlashlight()
-    if not isNight2 then return end
+	if not isNight2 then
+		return
+	end
 
-    if not flashlightOn then
-        -- Turn on
-        if batteryDead and battery < CONFIG.reactivateThreshold then
-            return -- Must recharge first
-        end
-        batteryDead = false
-        flashlightOn = true
+	if not flashlightOn then
+		-- Turn on
+		if batteryDead and battery < CONFIG.reactivateThreshold then
+			return -- Must recharge first
+		end
+		batteryDead = false
+		flashlightOn = true
 
-        if not emitterPart or not emitterPart.Parent then
-            createRig()
-        end
-        if spotlight then
-            spotlight.Enabled = true
-        end
+		if not emitterPart or not emitterPart.Parent then
+			createRig()
+		end
+		if spotlight then
+			spotlight.Enabled = true
+			if coneBeam then
+				coneBeam.Enabled = true
+			end
+		end
 
-        -- Update mobile button
-        if mobileButton then
-            mobileButton.BackgroundColor3 = Color3.fromRGB(255, 220, 100)
-            mobileButton.TextColor3 = Color3.fromRGB(30, 30, 30)
-        end
-    else
-        -- Turn off
-        flashlightOn = false
-        if spotlight then
-            spotlight.Enabled = false
-        end
+		-- Update mobile button
+		setMobileButtonState("on")
+	else
+		-- Turn off
+		flashlightOn = false
+		if spotlight then
+			spotlight.Enabled = false
+			if coneBeam then
+				coneBeam.Enabled = false
+			end
+		end
 
-        if mobileButton then
-            mobileButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-            mobileButton.TextColor3 = Color3.new(1, 1, 1)
-        end
-    end
+		setMobileButtonState("off")
+	end
 
-    FlashlightToggle:FireServer(flashlightOn)
+	FlashlightToggle:FireServer(flashlightOn)
 end
 
 -- ============================================================
 -- UPDATE LOOP
 -- ============================================================
 local flickerAccum = 0
+local wasBlinking = false
+local CONE_DEFAULT = Rig.coneRamp(CONFIG.coneTransparency)
+local CONE_HIDDEN = NumberSequence.new(1)
 
 local function startUpdateLoop()
-    updateConnection = RunService.Heartbeat:Connect(function(dt: number)
-        if not isNight2 then return end
+	updateConnection = RunService.Heartbeat:Connect(function(dt: number)
+		if not isNight2 then
+			return
+		end
 
-        -- Battery management
-        if flashlightOn then
-            battery = math.max(0, battery - CONFIG.drainRate * dt)
-            if battery <= 0 then
-                batteryDead = true
-                flashlightOn = false
-                if spotlight then spotlight.Enabled = false end
-                if mobileButton then
-                    mobileButton.BackgroundColor3 = Color3.fromRGB(60, 20, 20)
-                end
-            end
-        end
-        -- No passive recharge: the battery only refills when a Battery item
-        -- is consumed (see FlashlightRecharge below).
+		-- Battery management
+		if flashlightOn then
+			battery = math.max(0, battery - CONFIG.drainRate * dt)
+			if battery <= 0 then
+				batteryDead = true
+				flashlightOn = false
+				if spotlight then
+					spotlight.Enabled = false
+				end
+				if coneBeam then
+					coneBeam.Enabled = false
+				end
+				setMobileButtonState("dead")
+			end
+		end
+		-- No passive recharge: the battery only refills when a Battery item
+		-- is consumed (see FlashlightRecharge below).
 
-        -- Update battery UI
-        if batteryFill then
-            local pct = battery / CONFIG.batteryMax
-            batteryFill.Size = UDim2.new(pct, 0, 1, 0)
-            if pct > 0.5 then
-                batteryFill.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
-            elseif pct > 0.2 then
-                batteryFill.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
-            else
-                batteryFill.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-            end
-        end
+		-- Update battery UI
+		if batteryFill then
+			local pct = battery / CONFIG.batteryMax
+			batteryFill.Size = UDim2.new(pct, 0, 1, 0)
+			local color = if pct > 0.5
+				then UITheme.Color.Text
+				elseif pct > 0.2 then UITheme.Color.Warn
+				else UITheme.Color.Danger
+			batteryFill.BackgroundColor3 = color
+			if batteryValue then
+				batteryValue.Text = string.format("%d%%", math.floor(pct * 100 + 0.5))
+				batteryValue.TextColor3 = if pct > 0.5 then UITheme.Color.Dim else color
+			end
+		end
 
-        -- Flashlight effects
-        if flashlightOn and spotlight and spotlight.Parent then
-            local baseBrightness = CONFIG.brightness
+		-- Flashlight effects
+		if flashlightOn and spotlight and spotlight.Parent then
+			local pct = battery / CONFIG.batteryMax
+			local now = os.clock()
 
-            -- Low battery flicker
-            if battery < CONFIG.lowBatteryThreshold then
-                flickerAccum += dt
-                if flickerAccum > 0.1 then
-                    flickerAccum = 0
-                    if math.random() < 0.3 then
-                        spotlight.Brightness = math.random() * baseBrightness * 0.5
-                    else
-                        spotlight.Brightness = baseBrightness
-                    end
-                end
-            end
+			-- Output sags as the cell drains: full down to 40%, then easing to
+			-- 55% at empty, so a dying phone FEELS dimmer before it flickers.
+			local baseBrightness = CONFIG.brightness * (if pct > 0.4 then 1 else 0.55 + 0.45 * (pct / 0.4))
 
-            -- NGMI EMF interference
-            local character = player.Character
-            if character then
-                local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-                if rootPart then
-                    local nearestDist = math.huge
-                    for _, ngmi in CollectionService:GetTagged("NGMI") do
-                        if ngmi:IsA("Model") then
-                            local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
-                            if ngmiRoot and ngmiRoot:IsA("BasePart") then
-                                local dist = (ngmiRoot.Position - rootPart.Position).Magnitude
-                                if dist < nearestDist then nearestDist = dist end
-                            end
-                        end
-                    end
+			-- Brownout below 35%: a slow Perlin waver, plus random hard blinks
+			-- (sometimes a double blink) that get far more frequent once the
+			-- battery is under the low threshold.
+			if pct < 0.35 then
+				local depth = 1 - pct / 0.35
+				baseBrightness *= 1 - 0.18 * depth * (0.5 + 0.5 * math.noise(now * 2.5, 7.3))
 
-                    if nearestDist < CONFIG.emfInterferenceRange then
-                        local interference = 1 - (nearestDist / CONFIG.emfInterferenceRange)
-                        flickerAccum += dt * (1 + interference * 5)
-                        if flickerAccum > 0.05 then
-                            flickerAccum = 0
-                            if math.random() < interference * 0.6 then
-                                spotlight.Brightness = math.random() * baseBrightness * 0.3
-                                spotlight.Color = Color3.fromRGB(
-                                    255,
-                                    math.floor(245 - interference * 100),
-                                    math.floor(225 - interference * 150)
-                                )
-                            else
-                                spotlight.Brightness = baseBrightness
-                                spotlight.Color = CONFIG.color
-                            end
-                        end
-                    else
-                        if battery >= CONFIG.lowBatteryThreshold then
-                            spotlight.Brightness = baseBrightness
-                            spotlight.Color = CONFIG.color
-                        end
-                    end
-                end
-            end
-        end
-    end)
+				local blinksPerSecond = if battery < CONFIG.lowBatteryThreshold then 1.6 else 0.15
+				if now >= blinkUntil and math.random() < blinksPerSecond * dt then
+					blinkUntil = now + 0.04 + math.random() * 0.1
+					if math.random() < 0.35 then
+						-- Double blink: back on briefly, then off again.
+						local second = blinkUntil + 0.06
+						task.delay(second - now, function()
+							blinkUntil = math.max(blinkUntil, os.clock() + 0.05 + math.random() * 0.08)
+						end)
+					end
+				end
+				if now < blinkUntil then
+					baseBrightness *= 0.08
+				end
+			end
+			spotlight.Brightness = baseBrightness
+
+			-- Hide the visible shaft for the length of a blink. Only written on
+			-- the edge so it doesn't stomp the EMF stutter's own shaft dimming.
+			local blinking = now < blinkUntil
+			if coneBeam and blinking ~= wasBlinking then
+				coneBeam.Transparency = if blinking then CONE_HIDDEN else CONE_DEFAULT
+			end
+			wasBlinking = blinking
+
+			-- NGMI EMF interference
+			local character = player.Character
+			if character then
+				local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+				if rootPart then
+					local nearestDist = math.huge
+					for _, ngmi in CollectionService:GetTagged("NGMI") do
+						if ngmi:IsA("Model") then
+							local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
+							if ngmiRoot and ngmiRoot:IsA("BasePart") then
+								local dist = (ngmiRoot.Position - rootPart.Position).Magnitude
+								if dist < nearestDist then
+									nearestDist = dist
+								end
+							end
+						end
+					end
+
+					if nearestDist < CONFIG.emfInterferenceRange then
+						local interference = 1 - (nearestDist / CONFIG.emfInterferenceRange)
+						flickerAccum += dt * (1 + interference * 5)
+						if flickerAccum > 0.05 then
+							flickerAccum = 0
+							if math.random() < interference * 0.6 then
+								local sickly = Color3.fromRGB(
+									255,
+									math.floor(245 - interference * 100),
+									math.floor(225 - interference * 150)
+								)
+								spotlight.Brightness = math.random() * baseBrightness * 0.3
+								spotlight.Color = sickly
+								-- Drag the visible shaft down with the beam so the
+								-- cone doesn't stay bright while the light stutters.
+								if coneBeam then
+									coneBeam.Color = ColorSequence.new(sickly)
+									coneBeam.Transparency = NumberSequence.new(0.97)
+								end
+							else
+								spotlight.Brightness = baseBrightness
+								spotlight.Color = CONFIG.color
+								if coneBeam then
+									coneBeam.Color = ColorSequence.new(CONFIG.color)
+									coneBeam.Transparency = Rig.coneRamp(CONFIG.coneTransparency)
+								end
+							end
+						end
+					else
+						if battery >= CONFIG.lowBatteryThreshold then
+							spotlight.Brightness = baseBrightness
+							spotlight.Color = CONFIG.color
+						end
+					end
+				end
+			end
+		end
+	end)
 end
 
 -- ============================================================
 -- INPUT
 -- ============================================================
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-    if gameProcessed then return end
-    if input.KeyCode == CONFIG.toggleKey then
-        toggleFlashlight()
-    end
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode == CONFIG.toggleKey then
+		toggleFlashlight()
+	end
 end)
 
 -- ============================================================
 -- BATTERY RECHARGE (consuming a Battery item)
 -- ============================================================
 FlashlightRecharge.OnClientEvent:Connect(function()
-    battery = CONFIG.batteryMax
-    batteryDead = false
-    -- Pop the spotlight back to full brightness if it's currently on.
-    if flashlightOn and spotlight then
-        spotlight.Brightness = CONFIG.brightness
-        spotlight.Color = CONFIG.color
-    end
-    if mobileButton and not flashlightOn then
-        mobileButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-    end
+	battery = CONFIG.batteryMax
+	batteryDead = false
+	-- Pop the spotlight back to full brightness if it's currently on.
+	if flashlightOn and spotlight then
+		spotlight.Brightness = CONFIG.brightness
+		spotlight.Color = CONFIG.color
+	end
+	if not flashlightOn then
+		setMobileButtonState("off")
+	end
 end)
 
 -- ============================================================
 -- PHASE LISTENER
 -- ============================================================
 GameStateChanged.OnClientEvent:Connect(function(data: { phase: number })
-    if data.phase == 3 then -- NIGHT2
-        isNight2 = true
-        battery = CONFIG.batteryMax
-        batteryDead = false
-        createRig()
-        createMobileUI()
-        createBatteryUI()
-        startUpdateLoop()
-    else
-        isNight2 = false
-        flashlightOn = false
-        destroyRig()
-        if updateConnection then
-            updateConnection:Disconnect()
-            updateConnection = nil
-        end
-    end
+	if data.phase == 3 then -- NIGHT2
+		isNight2 = true
+		battery = CONFIG.batteryMax
+		batteryDead = false
+		createRig()
+		createMobileUI()
+		createBatteryUI()
+		startUpdateLoop()
+	else
+		isNight2 = false
+		flashlightOn = false
+		destroyRig()
+		local flashGui = playerGui:FindFirstChild("FlashlightUI")
+		if flashGui and flashGui:IsA("ScreenGui") then
+			flashGui.Enabled = false
+		end
+		if updateConnection then
+			updateConnection:Disconnect()
+			updateConnection = nil
+		end
+	end
 end)
 
 -- The rig follows the camera (not the character), so it survives respawns. Just
 -- rebuild it if it somehow went missing, and restore the on-state.
 player.CharacterAdded:Connect(function()
-    if not isNight2 then return end
-    if not emitterPart or not emitterPart.Parent then
-        createRig()
-    end
-    if flashlightOn then
-        if spotlight then spotlight.Enabled = true end
-    end
+	if not isNight2 then
+		return
+	end
+	if not emitterPart or not emitterPart.Parent then
+		createRig()
+	end
+	if flashlightOn then
+		if spotlight then
+			spotlight.Enabled = true
+		end
+		if coneBeam then
+			coneBeam.Enabled = true
+		end
+	end
 end)
 
 print("[FlashlightController] Initialized - press F to toggle (Night 2 only)")

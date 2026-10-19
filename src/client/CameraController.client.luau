@@ -1,13 +1,16 @@
 --!strict
 --------------------------------------------------------------------------------
 -- CameraController.client.luau
--- Manages camera modes (3rd-person, 1st-person, cutscene) and effects
--- (head-bob, screen shake) driven by game phase transitions.
+-- Manages camera modes (lobby, 1st-person, cutscene) and procedural camera
+-- feel (movement sway, turn lean, corner peek, screen shake) driven by game
+-- phase transitions.
 --
 -- Design notes:
---   • 3rd person (Day 1/2/3) uses Roblox's Classic camera with zoom limits
---   • 1st person (Night 2) smoothly tweens zoom → 0.5 then locks, adds head-bob
---   • Cutscene mode uses Scriptable camera with CFrame waypoint tweening
+--   • Lobby uses Roblox's Classic camera with a free cursor for the queue menu
+--   • Every gameplay phase is LockFirstPerson
+--   • Sway, turn lean and peek are applied in one RenderStepped pass and are
+--     skipped whenever the camera is not Custom, so they never fight a cutscene
+--   • Cutscene playback is delegated to Shared.CinematicCamera
 --   • Screen shake is additive CFrame noise, usable from any system
 --------------------------------------------------------------------------------
 
@@ -16,6 +19,9 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+
+local CinematicCamera = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("CinematicCamera"))
+local Sway = require(script.Parent:WaitForChild("Camera"):WaitForChild("Sway"))
 
 -- Remotes (created by Rojo from default.project.json)
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
@@ -37,28 +43,6 @@ local FIRST_PERSON_ZOOM = 0.5
 local HORROR_FOV = 55 -- claustrophobic FOV used during Night 2
 local FOV_TWEEN_DURATION = 1.5
 
--- Camera sway parameters.
--- The motion is a slow side-to-side sway (lateral drift + a gentle lean/roll),
--- NOT an up-and-down step bob. The vertical component is kept tiny — just a
--- faint bounce so it doesn't feel perfectly rigid. Sprinting swings wider and
--- faster. These are *target* values that the live sway lerps toward, so the
--- transition between walking and sprinting feels smooth rather than snapping.
-local WALK_SWAY_FREQUENCY = 0.4 -- side-to-side cycles per second while walking (very slow)
-local WALK_SWAY_AMPLITUDE_X = 0.035 -- lateral drift (studs) — the main motion
-local WALK_SWAY_AMPLITUDE_Y = 0.004 -- vertical bounce (studs) — barely there
-local WALK_SWAY_ROLL = 0.8 -- camera lean into the sway (degrees)
-
--- Sprinting keeps the SAME amplitude as walking, just twice the speed.
-local SPRINT_SWAY_FREQUENCY = WALK_SWAY_FREQUENCY * 2
-local SPRINT_SWAY_AMPLITUDE_X = WALK_SWAY_AMPLITUDE_X
-local SPRINT_SWAY_AMPLITUDE_Y = WALK_SWAY_AMPLITUDE_Y
-local SPRINT_SWAY_ROLL = WALK_SWAY_ROLL
-
-local SWAY_LERP_SPEED = 6 -- how quickly sway eases between walk/sprint states
-
--- Screen shake
-local SHAKE_FREQUENCY = 25 -- how rapidly the camera vibrates
-
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
@@ -68,15 +52,6 @@ type CameraMode = "Lobby" | "FirstPerson" | "Cutscene"
 local currentMode: CameraMode = "Lobby"
 local currentPhase: number = 0 -- LOBBY
 
--- Sway state (persists for the whole session; the game is always first-person)
-local swayConnection: RBXScriptConnection? = nil
-local swayPhase: number = 0 -- accumulated oscillation phase
--- Live sway values, lerped toward the walk/sprint targets each frame
-local curFreq: number = WALK_SWAY_FREQUENCY
-local curAmpY: number = WALK_SWAY_AMPLITUDE_Y
-local curAmpX: number = WALK_SWAY_AMPLITUDE_X
-local curRoll: number = 0
-
 -- Screen shake state
 local shakeIntensity: number = 0
 local shakeDuration: number = 0
@@ -85,20 +60,6 @@ local shakeConnection: RBXScriptConnection? = nil
 
 -- Cutscene state
 local cutsceneActive: boolean = false
-local preCutsceneCameraType: Enum.CameraType = Enum.CameraType.Custom
-local preCutsceneCFrame: CFrame = CFrame.new()
-
---------------------------------------------------------------------------------
--- Helper: get the player's humanoid safely
---------------------------------------------------------------------------------
-
-local function getHumanoid(): Humanoid?
-	local character = localPlayer.Character
-	if not character then
-		return nil
-	end
-	return character:FindFirstChildOfClass("Humanoid")
-end
 
 --------------------------------------------------------------------------------
 -- First Person Lock (always on)
@@ -137,65 +98,6 @@ local function enterLobbyCamera()
 
 	-- Release the cursor so the queue UI is clickable
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-end
-
---------------------------------------------------------------------------------
--- Camera Sway
--- A single persistent RenderStepped loop. Sway intensity scales with how fast
--- the player is actually moving (zero when standing still) and ramps up sharply
--- while sprinting. The current sway parameters ease toward the walk/sprint
--- targets so toggling sprint doesn't cause a visible snap.
---------------------------------------------------------------------------------
-
-local function startSway()
-	if swayConnection then
-		return
-	end
-
-	swayConnection = RunService.RenderStepped:Connect(function(dt: number)
-		if currentMode ~= "FirstPerson" then
-			return -- suspended during cutscenes
-		end
-
-		local humanoid = getHumanoid()
-		if not humanoid then
-			return
-		end
-
-		-- 0 when standing still, ~1 when moving under player control
-		local moveRatio = math.clamp(humanoid.MoveDirection.Magnitude, 0, 1)
-
-		-- The StaminaController sets this attribute while the player sprints
-		local sprinting = (localPlayer:GetAttribute("Sprinting") == true) and moveRatio > 0.01
-
-		-- Pick the target sway profile for this frame
-		local targetFreq = if sprinting then SPRINT_SWAY_FREQUENCY else WALK_SWAY_FREQUENCY
-		local targetAmpY = if sprinting then SPRINT_SWAY_AMPLITUDE_Y else WALK_SWAY_AMPLITUDE_Y
-		local targetAmpX = if sprinting then SPRINT_SWAY_AMPLITUDE_X else WALK_SWAY_AMPLITUDE_X
-		local targetRoll = if sprinting then SPRINT_SWAY_ROLL else WALK_SWAY_ROLL
-
-		-- Ease the live values toward the target
-		local alpha = math.clamp(dt * SWAY_LERP_SPEED, 0, 1)
-		curFreq += (targetFreq - curFreq) * alpha
-		curAmpY += (targetAmpY - curAmpY) * alpha
-		curAmpX += (targetAmpX - curAmpX) * alpha
-		curRoll += (targetRoll - curRoll) * alpha
-
-		-- Only advance the oscillation while actually moving
-		swayPhase += dt * curFreq * moveRatio
-
-		-- Side-to-side is the primary motion: lateral drift + a matching lean/roll
-		-- both ride the base frequency, so the camera gently rocks left↔right.
-		local lateral = math.sin(swayPhase * math.pi * 2)
-		local swayX = lateral * curAmpX * moveRatio
-		local roll = lateral * curRoll * moveRatio
-
-		-- Vertical is a tiny secondary bounce at double frequency (one dip per
-		-- footfall) so the sway doesn't feel perfectly flat — but stays subtle.
-		local swayY = math.sin(swayPhase * math.pi * 4) * curAmpY * moveRatio
-
-		camera.CFrame = camera.CFrame * CFrame.new(swayX, swayY, 0) * CFrame.Angles(0, 0, math.rad(roll))
-	end)
 end
 
 --------------------------------------------------------------------------------
@@ -278,6 +180,8 @@ end
 --- Play a scripted camera path through a series of CFrame waypoints.
 --- @param keyframes — ordered list of CFrame positions/orientations
 --- @param durations — time (seconds) to tween from keyframe[i] to keyframe[i+1]
+local restoreCameraAfterCutscene: () -> ()
+
 local function playCameraPath(keyframes: { CFrame }, durations: { number })
 	if #keyframes < 2 then
 		warn("[CameraController] playCameraPath needs at least 2 keyframes")
@@ -291,38 +195,22 @@ local function playCameraPath(keyframes: { CFrame }, durations: { number })
 
 	cutsceneActive = true
 
-	-- Save pre-cutscene state
-	preCutsceneCameraType = camera.CameraType
-	preCutsceneCFrame = camera.CFrame
+	-- CinematicCamera drives the camera absolutely every frame (so shake layered
+	-- on top never accumulates) and locks / unlocks controls itself.
+	local handle = CinematicCamera.play({
+		shots = CinematicCamera.fromKeyframes(keyframes, durations),
+		letterbox = true,
+	})
+	handle.Completed:Wait()
 
-	-- Switch to scriptable camera
-	camera.CameraType = Enum.CameraType.Scriptable
-	camera.CFrame = keyframes[1]
-
-	-- Disable player movement
-	setPlayerControlsEnabled(false)
-
-	-- Tween through each keyframe pair sequentially
-	for i = 1, #keyframes - 1 do
-		if not cutsceneActive then
-			break -- cutscene was cancelled (e.g., phase change)
-		end
-
-		local targetCF = keyframes[i + 1]
-		local duration = durations[i]
-
-		local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-		local tween = TweenService:Create(camera, tweenInfo, { CFrame = targetCF })
-		tween:Play()
-		tween.Completed:Wait()
+	-- A phase change may already have cancelled and restored it.
+	if cutsceneActive then
+		restoreCameraAfterCutscene()
 	end
-
-	-- Cutscene finished — restore camera
-	restoreCameraAfterCutscene()
 end
 
 --- Restore the camera back to gameplay mode after a cutscene.
-function restoreCameraAfterCutscene()
+restoreCameraAfterCutscene = function()
 	cutsceneActive = false
 
 	-- Re-enable player controls
@@ -374,6 +262,7 @@ local function onPhaseChanged(phaseData: { [string]: any })
 	-- Cancel any active cutscene on phase change
 	if cutsceneActive then
 		cutsceneActive = false
+		CinematicCamera.cancel()
 		setPlayerControlsEnabled(true)
 	end
 
@@ -403,7 +292,10 @@ end
 -- Start in the correct camera for the current phase. We begin in the LOBBY
 -- (free cursor for the queue menu); gameplay phases lock to first person.
 applyCameraForPhase(currentPhase)
-startSway()
+Sway.start(function()
+	return currentMode == "FirstPerson"
+end)
+
 
 -- Re-assert the first-person lock whenever the character respawns, just in case
 -- another system briefly changes camera settings during the respawn.
