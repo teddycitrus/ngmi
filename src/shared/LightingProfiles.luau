@@ -2,13 +2,34 @@
 --[[
 	LightingProfiles.luau
 	=====================
-	Lighting & post-processing presets for every phase of Not Gonna Make It.
+	Lighting, atmosphere and post-processing presets for every phase of
+	Not Gonna Make It.
 
-	Each profile maps 1:1 with a visual "mood" the game can tween to.
-	The LightingController (client) reads a profile and interpolates
-	all Lighting service properties + post-processing effects.
+	Each profile maps 1:1 with a visual "mood" the game can tween to. The
+	LightingController (client) reads a profile and interpolates the Lighting
+	service properties, the Atmosphere instance, and the post-processing stack.
 
-	Profiles are frozen — you cannot accidentally mutate them at runtime.
+	Rendering technology
+	--------------------
+	Every profile is authored for Enum.Technology.Future. Future is a voxel-free
+	renderer: Ambient/OutdoorAmbient contribute far less than they do under
+	ShadowMap, and tagged light fixtures do the actual illuminating with real
+	shadows and attenuation. That is what makes the NIGHT2 blackout read as a
+	true blackout rather than a grey wash.
+
+	Lighting.Technology is NOT script-assignable at runtime (Roblox restricts
+	write access), so the authoritative place it gets set is default.project.json
+	under Lighting.$properties. TECHNOLOGY below is exported so the controller can
+	assert the place is configured correctly and warn loudly if it is not.
+
+	Naming
+	------
+	Profiles are keyed by canonical phase names (LOBBY, DAY1, DAY2, CORRUPTION,
+	NIGHT2, DAY3). The pre-refactor names (Day1_Bright, Night2_Horror, ...) are
+	kept as aliases pointing at the same frozen tables, because CutsceneManager
+	resolves "Night2_Horror" by name and must keep working.
+
+	Profiles are deep-frozen; you cannot accidentally mutate them at runtime.
 ]]
 
 ----------------------------------------------------------------------
@@ -34,6 +55,17 @@ export type PostProcessingProfile = {
 	BlurSize: number,
 }
 
+--- Volumetric haze. Density is the headline dial: 0 is clear air, 0.7 is the
+--- soup the venue fills with once corruption sets in.
+export type AtmosphereProfile = {
+	Density: number,
+	Offset: number,
+	Color: Color3,
+	Decay: Color3,
+	Glare: number,
+	Haze: number,
+}
+
 export type LightingProfile = {
 	-- Core Lighting service properties
 	Ambient: Color3,
@@ -41,14 +73,33 @@ export type LightingProfile = {
 	ClockTime: number,
 	ColorShift_Bottom: Color3,
 	ColorShift_Top: Color3,
+	ExposureCompensation: number,
 	FogColor: Color3,
 	FogEnd: number,
 	FogStart: number,
 	OutdoorAmbient: Color3,
 
+	-- Future-renderer surface response. ShadowSoftness 0 is a razor edge, 1 is
+	-- a smear. The two Environment scales decide how much the sky contributes
+	-- diffuse fill and specular reflection to PBR materials: diffuse is a flat
+	-- ambient lift (kept low, see the exposure budget), specular is what makes
+	-- wet floors, metal and glass read as wet floors, metal and glass.
+	ShadowSoftness: number,
+	EnvironmentDiffuseScale: number,
+	EnvironmentSpecularScale: number,
+
+	-- Volumetric atmosphere
+	Atmosphere: AtmosphereProfile,
+
 	-- Post-processing effect targets
 	PostProcessing: PostProcessingProfile,
 }
+
+----------------------------------------------------------------------
+-- Rendering technology (see header, applied via default.project.json)
+----------------------------------------------------------------------
+
+local TECHNOLOGY: Enum.Technology = Enum.Technology.Future
 
 ----------------------------------------------------------------------
 -- Profiles
@@ -57,192 +108,379 @@ export type LightingProfile = {
 local Profiles: { [string]: LightingProfile } = {}
 
 ----------------------------------------------------------------------
--- DAY 1 — Bright late-afternoon sun. The hackathon just kicked off,
--- everyone's optimistic, free pizza is still warm. Golden hour vibes.
+-- Exposure budget (read this before touching any number below)
 ----------------------------------------------------------------------
-Profiles.Day1_Bright = {
-	Ambient            = Color3.fromRGB(200, 195, 180),
-	Brightness         = 2.5,
-	ClockTime          = 18,   -- 6 PM golden hour
-	ColorShift_Bottom  = Color3.fromRGB(0, 0, 0),
-	ColorShift_Top     = Color3.fromRGB(0, 0, 0),
-	FogColor           = Color3.fromRGB(255, 245, 230),
-	FogEnd             = 1000,
-	FogStart           = 500,
-	OutdoorAmbient     = Color3.fromRGB(200, 195, 180),
-	PostProcessing     = {
+-- Under Future, Ambient is a flat fill every surface receives for free, and it
+-- stacks on top of the 112 tagged ceiling fixtures. The venue corridors put
+-- 3-4 overlapping point lights on any given wall, so an Ambient in the 130-220
+-- range (what these profiles used to carry) pushes ordinary 0.85-albedo brick
+-- straight past white and the whole game reads as a blank page. Ambient here is
+-- therefore deliberately low: the practicals do the lighting, Ambient only
+-- keeps unlit corners from going pure black.
+--
+-- Same reasoning for the haze. Atmosphere Color is a light grey, so Density and
+-- Haze decide how fast distance turns into white soup; both stay low so a
+-- corridor still has a visible far end.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+-- LOBBY: the queue menu backdrop. Same clinical university fluorescent
+-- family as DAY1 but flatter, since a full-screen GUI sits over it and
+-- bloom behind text just reads as mush.
+----------------------------------------------------------------------
+Profiles.LOBBY = {
+	Ambient = Color3.fromRGB(28, 28, 32),
+	Brightness = 2,
+	ClockTime = 18,
+	ColorShift_Bottom = Color3.fromRGB(0, 0, 0),
+	ColorShift_Top = Color3.fromRGB(10, 8, 4),
+	ExposureCompensation = -0.2,
+	FogColor = Color3.fromRGB(116, 116, 120),
+	FogEnd = 420,
+	FogStart = 60,
+	OutdoorAmbient = Color3.fromRGB(60, 62, 70),
+	ShadowSoftness = 0.2,
+	EnvironmentDiffuseScale = 0.25,
+	EnvironmentSpecularScale = 0.6,
+	Atmosphere = {
+		Density = 0.08,
+		Offset = 0.1,
+		Color = Color3.fromRGB(156, 156, 162),
+		Decay = Color3.fromRGB(88, 90, 98),
+		Glare = 0.03,
+		Haze = 0.2,
+	},
+	PostProcessing = {
 		ColorCorrection = {
-			Brightness = 0.05,
-			Contrast   = 0.05,
-			Saturation = 0.1,
-			TintColor  = Color3.fromRGB(255, 250, 240),  -- warm golden
+			Brightness = 0,
+			Contrast = 0.03,
+			Saturation = 0,
+			TintColor = Color3.fromRGB(255, 252, 246),
 		},
 		Bloom = {
-			Intensity = 0.3,
-			Size      = 24,
-			Threshold = 1.0,
+			Intensity = 0.11,
+			Size = 20,
+			Threshold = 1.3,
 		},
 		BlurSize = 0,
 	},
 }
 
 ----------------------------------------------------------------------
--- DAY 2 — Normal midday. Neutral-cool indoor fluorescent lighting.
--- Slightly less warm than Day 1 — the excitement has worn off and
--- people are heads-down coding.
+-- DAY1: Friday evening. Warm, clinical university fluorescent light
+-- over a venue that is still cheerful: free pizza, everyone optimistic,
+-- nobody has read the judging criteria yet.
+--
+-- This profile is the calibration reference. It was tuned in-game against a
+-- lit corridor and the other five are derived from it, so if the venue ever
+-- needs a global exposure change, change DAY1 first and re-derive.
 ----------------------------------------------------------------------
-Profiles.Day2_Normal = {
-	Ambient            = Color3.fromRGB(170, 170, 170),
-	Brightness         = 2,
-	ClockTime          = 12,   -- high noon
-	ColorShift_Bottom  = Color3.fromRGB(0, 0, 0),
-	ColorShift_Top     = Color3.fromRGB(0, 0, 0),
-	FogColor           = Color3.fromRGB(190, 195, 210),
-	FogEnd             = 800,
-	FogStart           = 400,
-	OutdoorAmbient     = Color3.fromRGB(160, 160, 170),
-	PostProcessing     = {
+Profiles.DAY1 = {
+	Ambient = Color3.fromRGB(30, 30, 34),
+	Brightness = 2.2,
+	ClockTime = 18,
+	ColorShift_Bottom = Color3.fromRGB(0, 0, 0),
+	ColorShift_Top = Color3.fromRGB(14, 10, 4),
+	ExposureCompensation = -0.2,
+	FogColor = Color3.fromRGB(120, 120, 124),
+	FogEnd = 400,
+	FogStart = 60,
+	OutdoorAmbient = Color3.fromRGB(64, 66, 74),
+	ShadowSoftness = 0.18,
+	EnvironmentDiffuseScale = 0.3,
+	EnvironmentSpecularScale = 1,
+	Atmosphere = {
+		Density = 0.12,
+		Offset = 0.1,
+		Color = Color3.fromRGB(150, 154, 162),
+		Decay = Color3.fromRGB(84, 88, 98),
+		Glare = 0.03,
+		Haze = 0.3,
+	},
+	PostProcessing = {
 		ColorCorrection = {
 			Brightness = 0,
-			Contrast   = 0.05,
-			Saturation = 0,
-			TintColor  = Color3.fromRGB(245, 248, 255),  -- slightly cool
+			Contrast = 0.08,
+			Saturation = -0.06,
+			TintColor = Color3.fromRGB(248, 250, 255),
+		},
+		Bloom = {
+			Intensity = 0.12,
+			Size = 18,
+			Threshold = 1.35,
+		},
+		BlurSize = 0,
+	},
+}
+
+----------------------------------------------------------------------
+-- DAY2: Saturday. The light is dimmer and colder, contrast is up, and
+-- the haze has thickened. Nothing is overtly wrong yet; the room just
+-- feels heavier than it did yesterday.
+----------------------------------------------------------------------
+Profiles.DAY2 = {
+	Ambient = Color3.fromRGB(22, 23, 28),
+	Brightness = 1.7,
+	ClockTime = 12,
+	ColorShift_Bottom = Color3.fromRGB(0, 0, 0),
+	ColorShift_Top = Color3.fromRGB(6, 8, 14),
+	ExposureCompensation = -0.3,
+	FogColor = Color3.fromRGB(84, 88, 96),
+	FogEnd = 300,
+	FogStart = 40,
+	OutdoorAmbient = Color3.fromRGB(48, 50, 58),
+	ShadowSoftness = 0.15,
+	EnvironmentDiffuseScale = 0.2,
+	EnvironmentSpecularScale = 1,
+	Atmosphere = {
+		Density = 0.2,
+		Offset = 0.1,
+		Color = Color3.fromRGB(120, 128, 140),
+		Decay = Color3.fromRGB(60, 66, 78),
+		Glare = 0.04,
+		Haze = 0.6,
+	},
+	PostProcessing = {
+		ColorCorrection = {
+			Brightness = -0.03,
+			Contrast = 0.15,
+			Saturation = -0.18,
+			TintColor = Color3.fromRGB(232, 240, 252),
+		},
+		Bloom = {
+			Intensity = 0.12,
+			Size = 20,
+			Threshold = 1.35,
+		},
+		BlurSize = 0,
+	},
+}
+
+----------------------------------------------------------------------
+-- CORRUPTION: fired at the DAY2 halfway mark. Colour drains out of the
+-- venue, the tint goes cold and greenish-grey like a dead monitor, and
+-- the haze triples. The controller drives this over ~10 seconds so you
+-- watch it happen rather than cutting to it.
+----------------------------------------------------------------------
+Profiles.CORRUPTION = {
+	Ambient = Color3.fromRGB(14, 17, 16),
+	Brightness = 0.9,
+	ClockTime = 20,
+	ColorShift_Bottom = Color3.fromRGB(14, 20, 17),
+	ColorShift_Top = Color3.fromRGB(10, 16, 13),
+	ExposureCompensation = -0.35,
+	FogColor = Color3.fromRGB(28, 34, 32),
+	FogEnd = 220,
+	FogStart = 25,
+	OutdoorAmbient = Color3.fromRGB(26, 31, 30),
+	ShadowSoftness = 0.12,
+	EnvironmentDiffuseScale = 0.12,
+	EnvironmentSpecularScale = 1,
+	Atmosphere = {
+		Density = 0.34,
+		Offset = 0.2,
+		Color = Color3.fromRGB(104, 118, 112),
+		Decay = Color3.fromRGB(40, 48, 44),
+		Glare = 0.08,
+		Haze = 0.9,
+	},
+	PostProcessing = {
+		ColorCorrection = {
+			Brightness = -0.06,
+			Contrast = 0.26,
+			Saturation = -0.45,
+			TintColor = Color3.fromRGB(180, 200, 190),
 		},
 		Bloom = {
 			Intensity = 0.2,
-			Size      = 20,
+			Size = 26,
 			Threshold = 1.2,
-		},
-		BlurSize = 0,
-	},
-}
-
-----------------------------------------------------------------------
--- DAY 2 CORRUPTION — The venue gets… wrong. Sickly purple haze rolls
--- in, shadows stretch where they shouldn't, and the fluorescent
--- lights start buzzing at the wrong frequency. Something smells bad.
-----------------------------------------------------------------------
-Profiles.Day2_Corruption = {
-	Ambient            = Color3.fromRGB(80, 60, 90),
-	Brightness         = 1,
-	ClockTime          = 20,   -- 8 PM, light fading fast
-	ColorShift_Bottom  = Color3.fromRGB(20, 10, 30),
-	ColorShift_Top     = Color3.fromRGB(15, 5, 25),
-	FogColor           = Color3.fromRGB(30, 20, 40),
-	FogEnd             = 200,
-	FogStart           = 50,
-	OutdoorAmbient     = Color3.fromRGB(60, 40, 70),
-	PostProcessing     = {
-		ColorCorrection = {
-			Brightness = -0.05,
-			Contrast   = 0.2,
-			Saturation = -0.3,
-			TintColor  = Color3.fromRGB(180, 140, 200),  -- nauseating purple
-		},
-		Bloom = {
-			Intensity = 0.5,
-			Size      = 30,
-			Threshold = 0.8,
 		},
 		BlurSize = 2,
 	},
 }
 
 ----------------------------------------------------------------------
--- NIGHT 2 — Full-on horror. Near-total darkness with red emergency
--- lighting. Oppressive fog swallows everything past arm's reach.
--- The only reliable light source is your phone flashlight.
+-- NIGHT2: venue-wide blackout. Ambient and OutdoorAmbient are dropped
+-- to almost nothing, so under Future the ONLY illumination left is the
+-- tagged CeilingLight / EmergencyLight fixtures the players restore, and
+-- their own flashlight. Fog is deliberately tight: with the power out you
+-- genuinely cannot see down a hallway.
+--
+-- Bloom threshold stays above 1 on purpose. The venue carries roughly a
+-- thousand Neon parts (fixtures, monitors, signage) and a low threshold lets
+-- every one of them smear into a glow that lifts the blackout back to grey.
+-- At 1.1 only the genuinely hot sources (emergency strobes, the flashlight
+-- hotspot on a near wall, NGMI eyes) bloom.
+--
+-- ShadowSoftness is the lowest of any profile so the flashlight throws crisp,
+-- hard-edged shadows, and EnvironmentSpecularScale stays at 1 so wet floors
+-- still catch the beam even though the sky contributes no diffuse light.
 ----------------------------------------------------------------------
--- Base night is a cold, near-PITCH-BLACK dark — NO red. With the power cut, the
--- ambient is almost nothing, so until the floor's power boxes are fixed you can
--- barely see past your flashlight's reach (the restored ceiling lights and your
--- flashlight become the only real light). The blood-red wash is applied
--- dynamically by NGMIClient's proximity system, so the screen only goes red when
--- an NGMI is close / chasing you.
-Profiles.Night2_Horror = {
-	Ambient            = Color3.fromRGB(2, 2, 4),
-	Brightness         = 0,
-	ClockTime          = 0,    -- dead midnight
-	ColorShift_Bottom  = Color3.fromRGB(3, 4, 7),
-	ColorShift_Top     = Color3.fromRGB(2, 3, 6),
-	-- Tight black fog so you genuinely can't see down the hallway with the power
-	-- out — visibility falls off to nothing within a few studs, and your flashlight
-	-- is what cuts a cone through it.
-	FogColor           = Color3.fromRGB(0, 0, 1),
-	FogEnd             = 26,
-	FogStart           = 3,
-	OutdoorAmbient     = Color3.fromRGB(2, 2, 4),
-	PostProcessing     = {
+Profiles.NIGHT2 = {
+	Ambient = Color3.fromRGB(2, 2, 4),
+	Brightness = 0,
+	ClockTime = 0,
+	ColorShift_Bottom = Color3.fromRGB(3, 4, 7),
+	ColorShift_Top = Color3.fromRGB(2, 3, 6),
+	ExposureCompensation = -0.25,
+	FogColor = Color3.fromRGB(0, 0, 1),
+	FogEnd = 26,
+	FogStart = 3,
+	OutdoorAmbient = Color3.fromRGB(2, 2, 4),
+	ShadowSoftness = 0.08,
+	EnvironmentDiffuseScale = 0.05,
+	EnvironmentSpecularScale = 1,
+	Atmosphere = {
+		Density = 0.38,
+		Offset = 0.05,
+		Color = Color3.fromRGB(10, 12, 18),
+		Decay = Color3.fromRGB(3, 4, 7),
+		Glare = 0,
+		Haze = 0.9,
+	},
+	PostProcessing = {
 		ColorCorrection = {
-			Brightness = -0.2,
-			Contrast   = 0.4,
-			Saturation = -0.7,
-			TintColor  = Color3.fromRGB(210, 216, 230),  -- neutral cold wash
+			Brightness = -0.18,
+			Contrast = 0.38,
+			Saturation = -0.6,
+			-- Neutral cold wash. The blood-red proximity tint is layered on top
+			-- by NGMIClient's own effect, so it only appears when one is close.
+			TintColor = Color3.fromRGB(205, 214, 232),
 		},
 		Bloom = {
-			Intensity = 0.3,
-			Size      = 40,
-			Threshold = 0.5,
+			Intensity = 0.22,
+			Size = 30,
+			Threshold = 1.1,
 		},
 		BlurSize = 3,
 	},
 }
 
 ----------------------------------------------------------------------
--- DAY 3 — Dawn breaks. Warm golden sunrise floods the venue.
--- If you survived the night, this feels like redemption. Beautiful
--- volumetric light and soft bloom sell the "we made it" moment.
+-- DAY3: dawn. Warm golden sunrise floods the venue. If you survived the
+-- night this is meant to feel like relief, so it is the only profile that
+-- goes brighter and more saturated than neutral.
 ----------------------------------------------------------------------
-Profiles.Day3_Dawn = {
-	Ambient            = Color3.fromRGB(220, 200, 170),
-	Brightness         = 3,
-	ClockTime          = 8,    -- early morning sun
-	ColorShift_Bottom  = Color3.fromRGB(40, 25, 10),
-	ColorShift_Top     = Color3.fromRGB(30, 15, 5),
-	FogColor           = Color3.fromRGB(255, 220, 170),
-	FogEnd             = 2000,
-	FogStart           = 500,
-	OutdoorAmbient     = Color3.fromRGB(210, 190, 160),
-	PostProcessing     = {
+Profiles.DAY3 = {
+	Ambient = Color3.fromRGB(46, 42, 36),
+	Brightness = 3,
+	ClockTime = 8,
+	ColorShift_Bottom = Color3.fromRGB(40, 25, 10),
+	ColorShift_Top = Color3.fromRGB(30, 15, 5),
+	ExposureCompensation = -0.05,
+	FogColor = Color3.fromRGB(190, 168, 138),
+	FogEnd = 1400,
+	FogStart = 300,
+	OutdoorAmbient = Color3.fromRGB(96, 88, 74),
+	ShadowSoftness = 0.25,
+	EnvironmentDiffuseScale = 0.5,
+	EnvironmentSpecularScale = 1,
+	Atmosphere = {
+		Density = 0.14,
+		Offset = 0.3,
+		Color = Color3.fromRGB(200, 184, 158),
+		Decay = Color3.fromRGB(130, 108, 82),
+		Glare = 0.25,
+		Haze = 0.45,
+	},
+	PostProcessing = {
 		ColorCorrection = {
 			Brightness = 0.1,
-			Contrast   = 0.1,
+			Contrast = 0.1,
 			Saturation = 0.15,
-			TintColor  = Color3.fromRGB(255, 235, 200),  -- warm golden sunrise
+			TintColor = Color3.fromRGB(255, 235, 200),
 		},
 		Bloom = {
-			Intensity = 0.6,
-			Size      = 35,
-			Threshold = 0.6,
+			Intensity = 0.28,
+			Size = 28,
+			Threshold = 1,
 		},
 		BlurSize = 0,
 	},
 }
+----------------------------------------------------------------------
+-- Phase id → canonical profile name
+----------------------------------------------------------------------
+-- Mirrors GameConfig.Phase. Kept as plain numbers so this module stays
+-- dependency-free and can be required from anywhere without a cycle.
+----------------------------------------------------------------------
+local PHASE_PROFILE: { [number]: string } = {
+	[0] = "LOBBY",
+	[1] = "DAY1",
+	[2] = "DAY2",
+	[3] = "NIGHT2",
+	[4] = "DAY3",
+}
 
 ----------------------------------------------------------------------
--- Helper: Get a profile by name (returns nil for unknown profiles)
+-- Legacy aliases
 ----------------------------------------------------------------------
+-- Pre-refactor call sites resolve profiles by these names. CutsceneManager
+-- asks for "Night2_Horror" by name, so these must keep resolving. They point
+-- at the SAME frozen tables, not copies.
+----------------------------------------------------------------------
+local ALIASES: { [string]: string } = {
+	Day1_Bright = "DAY1",
+	Day2_Normal = "DAY2",
+	Day2_Corruption = "CORRUPTION",
+	Night2_Horror = "NIGHT2",
+	Day3_Dawn = "DAY3",
+}
+
+for alias, canonical in ALIASES do
+	Profiles[alias] = Profiles[canonical]
+end
+
+----------------------------------------------------------------------
+-- Lookup helpers
+----------------------------------------------------------------------
+
+--- Resolve a profile by canonical name or legacy alias. Returns nil for
+--- unknown names so callers can warn rather than crash.
 local function getProfile(name: string): LightingProfile?
 	return Profiles[name]
 end
 
+--- Resolve the profile for a GameConfig phase id. Falls back to LOBBY for
+--- an unrecognised phase, so a bad id dims the venue instead of erroring.
+local function getProfileForPhase(phase: number): LightingProfile
+	local name = PHASE_PROFILE[phase] or "LOBBY"
+	return Profiles[name]
+end
+
+--- Canonical profile name for a phase id, for logging and tween bookkeeping.
+local function getProfileName(phase: number): string
+	return PHASE_PROFILE[phase] or "LOBBY"
+end
+
 ----------------------------------------------------------------------
--- Freeze all profiles to prevent runtime mutation
+-- Freeze
 ----------------------------------------------------------------------
--- Deep-freeze each profile's nested tables
+-- Aliases share table identity with their canonical profile, so guard against
+-- double-freezing the same table (table.freeze errors on an already-frozen
+-- table).
+----------------------------------------------------------------------
 for _, profile in Profiles do
-	table.freeze(profile.PostProcessing.ColorCorrection)
-	table.freeze(profile.PostProcessing.Bloom)
-	table.freeze(profile.PostProcessing)
-	table.freeze(profile)
+	if not table.isfrozen(profile) then
+		table.freeze(profile.PostProcessing.ColorCorrection)
+		table.freeze(profile.PostProcessing.Bloom)
+		table.freeze(profile.PostProcessing)
+		table.freeze(profile.Atmosphere)
+		table.freeze(profile)
+	end
 end
 
 ----------------------------------------------------------------------
 -- Module Export
 ----------------------------------------------------------------------
 local LightingProfilesModule = {
-	Profiles   = table.freeze(Profiles),
+	TECHNOLOGY = TECHNOLOGY,
+	Profiles = table.freeze(Profiles),
+	PHASE_PROFILE = table.freeze(PHASE_PROFILE),
 	getProfile = getProfile,
+	getProfileForPhase = getProfileForPhase,
+	getProfileName = getProfileName,
 }
 
 return table.freeze(LightingProfilesModule)

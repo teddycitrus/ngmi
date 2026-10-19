@@ -44,7 +44,9 @@
         "FlashlightRecharge": { "$className": "RemoteEvent" },
         "CorruptionStarted": { "$className": "RemoteEvent" },
         "EnergyRefilled": { "$className": "RemoteEvent" },
-        "AdminCommand": { "$className": "RemoteEvent" }
+        "AdminCommand": { "$className": "RemoteEvent" },
+        "EquipItem": { "$className": "RemoteEvent" },
+        "CrouchState": { "$className": "RemoteEvent" }
       }
     },
 
@@ -87,14 +89,20 @@
     "Lighting": {
       "$className": "Lighting",
       "$properties": {
-        "Ambient": [170, 170, 170],
+        "Ambient": [0.110, 0.110, 0.125],
         "Brightness": 2,
         "ClockTime": 18,
-        "FogEnd": 1000,
-        "FogStart": 500,
-        "OutdoorAmbient": [170, 170, 170],
+        "FogEnd": 420,
+        "FogStart": 60,
+        "OutdoorAmbient": [0.235, 0.243, 0.275],
         "GlobalShadows": true,
-        "Technology": "ShadowMap"
+        "ShadowSoftness": 0.2,
+        "EnvironmentDiffuseScale": 0.25,
+        "EnvironmentSpecularScale": 0.6,
+        "Technology": "Future"
+      },
+      "GameAtmosphere": {
+        "$className": "Atmosphere"
       }
     },
 
