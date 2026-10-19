@@ -117,13 +117,13 @@ Items.battery = {
 
 ----------------------------------------------------------------------
 -- PLUNGER
--- The Poop Monster's bane. Spray it with deodorant to stagger it,
--- then close in and plunge. Worthless if you skip the spray.
+-- The Poop Monster's bane. Held like a sword, click to slash forward
+-- and whack the monster directly. No spray required.
 ----------------------------------------------------------------------
 Items.plunger = {
 	id          = "plunger",
 	name        = "Plunger",
-	description = "Whack the staggered Poop Monster. Spray it first or it just shrugs you off.",
+	description = "Swing it like a sword. Click to slash the Poop Monster.",
 	itemType    = "weapon",
 	maxStack    = 1,
 	icon        = "rbxassetid://0",  -- placeholder

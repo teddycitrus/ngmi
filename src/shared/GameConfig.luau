@@ -22,11 +22,11 @@ export type PhaseId = number
 --   DAY3   → ending cutscene determined by player performance
 ----------------------------------------------------------------------
 local Phase: { [string]: PhaseId } = {
-	LOBBY  = 0,
-	DAY1   = 1,
-	DAY2   = 2,
+	LOBBY = 0,
+	DAY1 = 1,
+	DAY2 = 2,
 	NIGHT2 = 3,
-	DAY3   = 4,
+	DAY3 = 4,
 }
 
 ----------------------------------------------------------------------
@@ -41,10 +41,10 @@ local PHASE_ORDER: { PhaseId } = { Phase.LOBBY, Phase.DAY1, Phase.DAY2, Phase.NI
 -- driven by the cinematic system, not a countdown timer.
 ----------------------------------------------------------------------
 local PhaseDuration: { [PhaseId]: number } = {
-	[Phase.DAY1]   = 180,   -- 3 minutes
-	[Phase.DAY2]   = 600,   -- 10 minutes
-	[Phase.NIGHT2] = 900,   -- 15 minutes
-	[Phase.DAY3]   = 0,     -- cutscene (no timer)
+	[Phase.DAY1] = 180, -- 3 minutes
+	[Phase.DAY2] = 600, -- 10 minutes
+	[Phase.NIGHT2] = 900, -- 15 minutes
+	[Phase.DAY3] = 0, -- cutscene (no timer)
 }
 
 ----------------------------------------------------------------------
@@ -59,10 +59,10 @@ export type TimeRange = {
 }
 
 local PhaseTimeRanges: { [PhaseId]: TimeRange } = {
-	[Phase.DAY1]   = { Start = 18, End = 21 },  -- late afternoon → dusk
-	[Phase.DAY2]   = { Start = 9,  End = 24 },  -- morning → midnight
-	[Phase.NIGHT2] = { Start = 0,  End = 8 },   -- midnight → dawn
-	[Phase.DAY3]   = { Start = 8,  End = 16 },  -- morning → afternoon
+	[Phase.DAY1] = { Start = 18, End = 21 }, -- late afternoon → dusk
+	[Phase.DAY2] = { Start = 9, End = 24 }, -- morning → midnight
+	[Phase.NIGHT2] = { Start = 0, End = 8 }, -- midnight → dawn
+	[Phase.DAY3] = { Start = 8, End = 16 }, -- morning → afternoon
 }
 
 ----------------------------------------------------------------------
@@ -71,7 +71,7 @@ local PhaseTimeRanges: { [PhaseId]: TimeRange } = {
 -- At this many seconds into Day 2 the venue starts warping. Lights
 -- flicker, NPCs begin mutating, and the vibe gets *real* bad.
 ----------------------------------------------------------------------
-local DAY2_CORRUPTION_START: number = 300  -- 5 minutes (halfway through Day 2)
+local DAY2_CORRUPTION_START: number = 300 -- 5 minutes (halfway through Day 2)
 
 ----------------------------------------------------------------------
 -- Player Configuration
@@ -84,9 +84,9 @@ export type PlayerConfig = {
 }
 
 local Player: PlayerConfig = {
-	walkSpeed      = 11,   -- ~30% slower than the old 16 for a heavier, tenser pace
-	sprintSpeed    = 24,
-	maxHealth      = 100,
+	walkSpeed = 11, -- ~30% slower than the old 16 for a heavier, tenser pace
+	sprintSpeed = 24,
+	maxHealth = 100,
 	inventorySlots = 4,
 }
 
@@ -102,14 +102,20 @@ export type NGMIConfig = {
 	baseSpeed: number,
 	detectionRange: number,
 	attackRange: number,
+	attackWindup: { [string]: number },
+	attackStrike: { [string]: number },
 }
 
 local NGMI: NGMIConfig = {
-	baseDamage     = 25,    -- HP per hit
-	stunDuration   = 3,     -- seconds incapacitated after deodorant
-	baseSpeed      = 20,    -- studs/sec pursuit speed
-	detectionRange = 40,    -- studs – radius of awareness
-	attackRange    = 5,     -- studs – melee swipe distance
+	baseDamage = 25, -- HP per hit
+	stunDuration = 3, -- seconds incapacitated after deodorant
+	baseSpeed = 20, -- studs/sec pursuit speed
+	detectionRange = 40, -- studs – radius of awareness
+	attackRange = 5, -- studs – melee swipe distance
+	-- Seconds per attack kind. The server times the hit off these and
+	-- NGMIAnimator times the wind-up and strike poses off the same numbers.
+	attackWindup = { swipe_l = 0.32, swipe_r = 0.32, lunge = 0.42 },
+	attackStrike = { swipe_l = 0.12, swipe_r = 0.12, lunge = 0.28 },
 }
 
 ----------------------------------------------------------------------
@@ -123,7 +129,7 @@ local QueueSizes: { number } = { 1, 2, 4 }
 ----------------------------------------------------------------------
 -- Lobby Countdown
 ----------------------------------------------------------------------
-local LOBBY_COUNTDOWN: number = 10  -- seconds after enough players queue
+local LOBBY_COUNTDOWN: number = 10 -- seconds after enough players queue
 
 ----------------------------------------------------------------------
 -- True Ending Threshold
@@ -136,12 +142,12 @@ local COMPLETION_THRESHOLD: number = 100
 ----------------------------------------------------------------------
 -- Respawn
 ----------------------------------------------------------------------
-local RESPAWN_DELAY: number = 3  -- seconds before player respawns
+local RESPAWN_DELAY: number = 3 -- seconds before player respawns
 
 ----------------------------------------------------------------------
 -- Coding
 ----------------------------------------------------------------------
-local CODING_SPEED_BASE: number = 1  -- completion % per second at desk
+local CODING_SPEED_BASE: number = 1 -- completion % per second at desk
 
 ----------------------------------------------------------------------
 -- Deodorant Spray Configuration
@@ -157,10 +163,10 @@ export type DeodorantConfig = {
 }
 
 local Deodorant: DeodorantConfig = {
-	maxAmmo   = 100,    -- full can capacity
-	sprayRate = 10,     -- ammo consumed per second while spraying
-	stunCost  = 30,     -- ammo consumed per successful stun
-	range     = 15,     -- studs – effective spray distance
+	maxAmmo = 100, -- full can capacity
+	sprayRate = 10, -- ammo consumed per second while spraying
+	stunCost = 30, -- ammo consumed per successful stun
+	range = 15, -- studs – effective spray distance
 }
 
 ----------------------------------------------------------------------
@@ -175,8 +181,8 @@ export type EnergyBarConfig = {
 }
 
 local EnergyBar: EnergyBarConfig = {
-	speedBoost = 1.3,   -- multiplier applied to current move speed
-	duration   = 10,    -- seconds the boost lasts
+	speedBoost = 1.3, -- multiplier applied to current move speed
+	duration = 10, -- seconds the boost lasts
 }
 
 ----------------------------------------------------------------------
@@ -192,8 +198,8 @@ export type SabotageConfig = {
 }
 
 local Sabotage: SabotageConfig = {
-	intervalMin = 180,   -- 3 minutes minimum between sabotage events
-	intervalMax = 240,   -- 4 minutes maximum
+	intervalMin = 180, -- 3 minutes minimum between sabotage events
+	intervalMax = 240, -- 4 minutes maximum
 }
 
 ----------------------------------------------------------------------
@@ -205,90 +211,129 @@ export type NGMISpawnConfig = {
 }
 
 local NGMISpawn: NGMISpawnConfig = {
-	spawnInterval = 45,  -- seconds between NGMI waves in NIGHT2
-	maxCount      = 8,   -- max simultaneous NGMIs on the map
+	spawnInterval = 45, -- seconds between NGMI waves in NIGHT2
+	maxCount = 8, -- max simultaneous NGMIs on the map
 }
 
 ----------------------------------------------------------------------
 -- Map dimensions (studs) — used by MapBuilder
 ----------------------------------------------------------------------
 local MAP = {
-	MAIN_HALL       = { width = 200, depth = 150, wallHeight = 20, wallThickness = 2 },
-	LOBBY_AREA      = { width = 60,  depth = 40,  wallHeight = 20, wallThickness = 2 },
-	BATHROOM        = { width = 25,  depth = 20 },
-	SERVER_CLOSET   = { width = 15,  depth = 12 },
-	KITCHEN         = { width = 30,  depth = 20 },
-	ELECTRICAL_ROOM = { width = 20,  depth = 15 },
-	HALLWAY_WIDTH   = 10,
-	DESK_SPACING    = 12,
-	DESK_ROWS       = 5,
-	DESKS_PER_ROW   = 4,
+	MAIN_HALL = { width = 200, depth = 150, wallHeight = 20, wallThickness = 2 },
+	LOBBY_AREA = { width = 60, depth = 40, wallHeight = 20, wallThickness = 2 },
+	BATHROOM = { width = 25, depth = 20 },
+	SERVER_CLOSET = { width = 15, depth = 12 },
+	KITCHEN = { width = 30, depth = 20 },
+	ELECTRICAL_ROOM = { width = 20, depth = 15 },
+	HALLWAY_WIDTH = 10,
+	DESK_SPACING = 12,
+	DESK_ROWS = 5,
+	DESKS_PER_ROW = 4,
 }
 
 ----------------------------------------------------------------------
 -- Colors — corporate conference-centre palette
 ----------------------------------------------------------------------
 local COLORS = {
-	WALL           = Color3.fromRGB(220, 220, 225),
-	WALL_TRIM      = Color3.fromRGB(180, 180, 185),
-	FLOOR_WOOD     = Color3.fromRGB(139, 90, 43),
-	FLOOR_TILE     = Color3.fromRGB(200, 200, 200),
-	CEILING        = Color3.fromRGB(240, 240, 240),
-	DESK           = Color3.fromRGB(160, 130, 100),
-	CHAIR          = Color3.fromRGB(50, 50, 55),
-	MONITOR        = Color3.fromRGB(30, 30, 30),
-	SCREEN         = Color3.fromRGB(100, 180, 255),
-	BANNER_RED     = Color3.fromRGB(200, 40, 40),
-	BANNER_BLUE    = Color3.fromRGB(40, 80, 200),
-	BANNER_GREEN   = Color3.fromRGB(40, 180, 80),
-	PIPE           = Color3.fromRGB(120, 120, 125),
-	EXIT_SIGN      = Color3.fromRGB(255, 30, 30),
-	EMERGENCY      = Color3.fromRGB(255, 0, 0),
+	WALL = Color3.fromRGB(220, 220, 225),
+	WALL_TRIM = Color3.fromRGB(180, 180, 185),
+	FLOOR_WOOD = Color3.fromRGB(139, 90, 43),
+	FLOOR_TILE = Color3.fromRGB(200, 200, 200),
+	CEILING = Color3.fromRGB(240, 240, 240),
+	DESK = Color3.fromRGB(160, 130, 100),
+	CHAIR = Color3.fromRGB(50, 50, 55),
+	MONITOR = Color3.fromRGB(30, 30, 30),
+	SCREEN = Color3.fromRGB(100, 180, 255),
+	BANNER_RED = Color3.fromRGB(200, 40, 40),
+	BANNER_BLUE = Color3.fromRGB(40, 80, 200),
+	BANNER_GREEN = Color3.fromRGB(40, 180, 80),
+	PIPE = Color3.fromRGB(120, 120, 125),
+	EXIT_SIGN = Color3.fromRGB(255, 30, 30),
+	EMERGENCY = Color3.fromRGB(255, 0, 0),
 	ENERGY_DRINK_1 = Color3.fromRGB(0, 200, 80),
 	ENERGY_DRINK_2 = Color3.fromRGB(0, 120, 255),
 	ENERGY_DRINK_3 = Color3.fromRGB(255, 200, 0),
 	SLEEPING_BAG_1 = Color3.fromRGB(50, 80, 160),
 	SLEEPING_BAG_2 = Color3.fromRGB(160, 50, 50),
 	SLEEPING_BAG_3 = Color3.fromRGB(50, 140, 50),
-	GLASS          = Color3.fromRGB(200, 220, 240),
-	PODIUM         = Color3.fromRGB(80, 50, 30),
-	WHITEBOARD     = Color3.fromRGB(250, 250, 250),
-	LOCKER         = Color3.fromRGB(100, 110, 120),
-	SERVER_RACK    = Color3.fromRGB(40, 40, 45),
-	TOILET         = Color3.fromRGB(240, 240, 245),
-	COUNTER        = Color3.fromRGB(180, 180, 180),
-	TILE_WALL      = Color3.fromRGB(225, 232, 236),
-	TILE_FLOOR     = Color3.fromRGB(120, 132, 142),
-	METAL_BRUSHED  = Color3.fromRGB(160, 165, 170),
-	CORK           = Color3.fromRGB(150, 110, 66),
-	WOOD_TRIM      = Color3.fromRGB(110, 80, 55),
-	UNI_MAROON     = Color3.fromRGB(110, 28, 40),
-	UNI_NAVY       = Color3.fromRGB(40, 50, 110),
-	UNI_GOLD       = Color3.fromRGB(212, 175, 60),
+	GLASS = Color3.fromRGB(200, 220, 240),
+	PODIUM = Color3.fromRGB(80, 50, 30),
+	WHITEBOARD = Color3.fromRGB(250, 250, 250),
+	LOCKER = Color3.fromRGB(100, 110, 120),
+	SERVER_RACK = Color3.fromRGB(40, 40, 45),
+	TOILET = Color3.fromRGB(240, 240, 245),
+	COUNTER = Color3.fromRGB(180, 180, 180),
+	TILE_WALL = Color3.fromRGB(225, 232, 236),
+	TILE_FLOOR = Color3.fromRGB(120, 132, 142),
+	METAL_BRUSHED = Color3.fromRGB(160, 165, 170),
+	CORK = Color3.fromRGB(150, 110, 66),
+	WOOD_TRIM = Color3.fromRGB(110, 80, 55),
+	UNI_MAROON = Color3.fromRGB(110, 28, 40),
+	UNI_NAVY = Color3.fromRGB(40, 50, 110),
+	UNI_GOLD = Color3.fromRGB(212, 175, 60),
+}
+
+----------------------------------------------------------------------
+-- Surfaces: material per structural role in the procedural venue
+----------------------------------------------------------------------
+-- One entry per structural role the Venue modules build (Kit.surface). Roblox's
+-- built-in materials carry their own PBR response, so material and reflectance
+-- do the work with no uploaded assets.
+--
+-- A level's ceiling IS the underside of the slab above it. There is
+-- deliberately no separate ceiling part: adding one would put two faces in the
+-- same plane and z-fight (HANDOFF 3.4).
+----------------------------------------------------------------------
+export type Surface = {
+	material: Enum.Material,
+	reflectance: number,
+}
+
+local function surface(material: Enum.Material, reflectance: number): Surface
+	return { material = material, reflectance = reflectance }
+end
+
+local SURFACES: { [string]: Surface } = {
+	-- Ground floor: scuffed institutional lino over a concrete deck. CeramicTiles
+	-- carries grout lines, which is what sells "university corridor" up close.
+	FLOOR_LINO = surface(Enum.Material.CeramicTiles, 0.02),
+	-- Upper floors: the same lino, walked on harder.
+	FLOOR_WORN = surface(Enum.Material.CeramicTiles, 0),
+	-- Roof deck: nobody sees the top, but the underside is the top floor ceiling.
+	ROOF_DECK = surface(Enum.Material.Asphalt, 0),
+	-- Painted drywall over block, the default interior partition.
+	WALL_PAINTED = surface(Enum.Material.Plaster, 0),
+	-- Exposed structural block: stairwell, plant rooms, server closet.
+	WALL_CONCRETE_BRICK = surface(Enum.Material.Brick, 0),
+	-- Poured concrete treads and landings.
+	STAIR_CONCRETE = surface(Enum.Material.Concrete, 0),
+	-- Wet rooms.
+	TILE_WET = surface(Enum.Material.CeramicTiles, 0.05),
 }
 
 ----------------------------------------------------------------------
 -- CollectionService Tags
 ----------------------------------------------------------------------
 local TAGS = {
-	PLAYER_DESK        = "PlayerDesk",
-	NPC_SPAWN          = "NPCSpawn",
-	NGMI_SPAWN         = "NGMISpawn",
-	ITEM_SPAWN         = "ItemSpawn",
-	HIDING_SPOT        = "HidingSpot",
-	ELECTRICAL_PANEL   = "ElectricalPanel",
-	CEILING_LIGHT      = "CeilingLight",
-	EMERGENCY_LIGHT    = "EmergencyLight",
-	QUEST_CHAIR        = "QuestChair",
+	PLAYER_DESK = "PlayerDesk",
+	NPC_SPAWN = "NPCSpawn",
+	NGMI_SPAWN = "NGMISpawn",
+	ITEM_SPAWN = "ItemSpawn",
+	HIDING_SPOT = "HidingSpot",
+	ELECTRICAL_PANEL = "ElectricalPanel",
+	CEILING_LIGHT = "CeilingLight",
+	EMERGENCY_LIGHT = "EmergencyLight",
+	QUEST_CHAIR = "QuestChair",
 	POOP_MONSTER_SPAWN = "PoopMonsterSpawn",
-	DESK_SEAT          = "DeskSeat",   -- a desk chair an ambient typist NPC sits at
-	LEAN_SPOT          = "LeanSpot",   -- a wall spot an ambient hacker leans against (has Face attr)
-	COUCH_SEAT         = "CouchSeat",  -- a couch cushion an ambient hacker sleeps/lounges on
-	SLEEP_SPOT         = "SleepSpot",  -- a floor spot for a sleeping bag + sleeping hacker (has Yaw attr)
-	ELEVATOR_CAR       = "ElevatorCar",  -- a movable elevator car (Model, PrimaryPart = CarFloor)
-	ELEVATOR_CALL      = "ElevatorCall", -- a call/destination button (has ElevatorId + TargetY attrs)
-	ELEVATOR_DOOR      = "ElevatorDoor", -- a sliding shaft-door panel (ElevatorId/Level/Closed/Open attrs)
-	SERVER_RACK        = "ServerRack",   -- a repairable server rack (NIGHT2, gated on floor power)
+	DESK_SEAT = "DeskSeat", -- a desk chair an ambient typist NPC sits at
+	LEAN_SPOT = "LeanSpot", -- a wall spot an ambient hacker leans against (has Face attr)
+	COUCH_SEAT = "CouchSeat", -- a couch cushion an ambient hacker sleeps/lounges on
+	SLEEP_SPOT = "SleepSpot", -- a floor spot for a sleeping bag + sleeping hacker (has Yaw attr)
+	ELEVATOR_CAR = "ElevatorCar", -- a movable elevator car (Model, PrimaryPart = CarFloor)
+	ELEVATOR_CALL = "ElevatorCall", -- a call/destination button (has ElevatorId + TargetY attrs)
+	ELEVATOR_DOOR = "ElevatorDoor", -- a sliding shaft-door panel (ElevatorId/Level/Closed/Open attrs)
+	SERVER_RACK = "ServerRack", -- a repairable server rack (NIGHT2, gated on floor power)
+	EMISSIVE_SCREEN = "EmissiveScreen", -- a self-lit monitor/laptop/TV panel (see AssetLibrary.makeScreen)
 }
 
 ----------------------------------------------------------------------
@@ -299,11 +344,11 @@ local TAGS = {
 -- numeric ID here. An ID of 0 means "unconfigured" and is silently skipped, so
 -- the game runs fine before the badges exist (see server/BadgeManager.luau).
 local BADGES = {
-	deathByPoop       = 0, -- "Flushed"   — killed by the Bathroom Monster
-	deathByNGMI       = 0, -- "Caught"    — killed by an NGMI
-	becameNGMI        = 0, -- "NGMI"      — survived the weekend but shipped nothing
-	trueEnding        = 0, -- "Shipped It"— survived and shipped 100%
-	killedPoopMonster = 0, -- "Plumber"   — defeated the Bathroom Monster
+	deathByPoop = 1337195619140502, -- "Royal Flush":      killed by the Bathroom Monster
+	deathByNGMI = 1486111329931916, -- "Almost Made It":   killed by an NGMI
+	becameNGMI = 1489350939298689, -- "NGMI":             survived the weekend but shipped nothing
+	trueEnding = 880403270095328, -- "You Made It!":     survived and shipped 100%
+	killedPoopMonster = 3509733381828384, -- "Stinky Business":  defeated the Bathroom Monster
 }
 
 ----------------------------------------------------------------------
@@ -316,45 +361,46 @@ local SABOTAGE_TYPES: { string } = { "PowerOutage", "ServerCrash", "WiFiDrop" }
 ----------------------------------------------------------------------
 local GameConfig = {
 	-- Phase system
-	Phase                  = table.freeze(Phase),
-	PHASE_ORDER            = table.freeze(PHASE_ORDER),
-	PhaseDuration          = table.freeze(PhaseDuration),
-	PhaseTimeRanges        = table.freeze(PhaseTimeRanges),
+	Phase = table.freeze(Phase),
+	PHASE_ORDER = table.freeze(PHASE_ORDER),
+	PhaseDuration = table.freeze(PhaseDuration),
+	PhaseTimeRanges = table.freeze(PhaseTimeRanges),
 
 	-- Corruption
-	DAY2_CORRUPTION_START  = DAY2_CORRUPTION_START,
+	DAY2_CORRUPTION_START = DAY2_CORRUPTION_START,
 
 	-- Player
-	Player                 = table.freeze(Player),
-	RESPAWN_DELAY          = RESPAWN_DELAY,
-	CODING_SPEED_BASE      = CODING_SPEED_BASE,
+	Player = table.freeze(Player),
+	RESPAWN_DELAY = RESPAWN_DELAY,
+	CODING_SPEED_BASE = CODING_SPEED_BASE,
 
 	-- Enemies
-	NGMI                   = table.freeze(NGMI),
-	NGMISpawn              = table.freeze(NGMISpawn),
+	NGMI = table.freeze(NGMI),
+	NGMISpawn = table.freeze(NGMISpawn),
 
 	-- Matchmaking
-	QueueSizes             = table.freeze(QueueSizes),
-	LOBBY_COUNTDOWN        = LOBBY_COUNTDOWN,
+	QueueSizes = table.freeze(QueueSizes),
+	LOBBY_COUNTDOWN = LOBBY_COUNTDOWN,
 
 	-- Win condition
-	COMPLETION_THRESHOLD   = COMPLETION_THRESHOLD,
+	COMPLETION_THRESHOLD = COMPLETION_THRESHOLD,
 
 	-- Badges / achievements
-	BADGES                 = table.freeze(BADGES),
+	BADGES = table.freeze(BADGES),
 
 	-- Items / equipment
-	Deodorant              = table.freeze(Deodorant),
-	EnergyBar              = table.freeze(EnergyBar),
+	Deodorant = table.freeze(Deodorant),
+	EnergyBar = table.freeze(EnergyBar),
 
 	-- Events
-	Sabotage               = table.freeze(Sabotage),
-	SABOTAGE_TYPES         = table.freeze(SABOTAGE_TYPES),
+	Sabotage = table.freeze(Sabotage),
+	SABOTAGE_TYPES = table.freeze(SABOTAGE_TYPES),
 
 	-- World
-	MAP                    = table.freeze(MAP),
-	COLORS                 = table.freeze(COLORS),
-	TAGS                   = table.freeze(TAGS),
+	MAP = table.freeze(MAP),
+	COLORS = table.freeze(COLORS),
+	SURFACES = table.freeze(SURFACES),
+	TAGS = table.freeze(TAGS),
 }
 
 return table.freeze(GameConfig)
