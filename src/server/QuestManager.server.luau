@@ -2,7 +2,7 @@
 --[[
     QuestManager.server.luau
     Server-side quest tracking for side quests:
-    1. The Chair Hoarder - collect 4 chairs and deliver
+    1. The Chair Hoarder - collect 4 folding chairs scattered on the ground floor
     2. Bathroom Poop Monster - boss fight in the bathroom
 ]]
 
@@ -14,14 +14,11 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
-local ItemDefinitions = require(Shared:WaitForChild("ItemDefinitions"))
 local BadgeManager = require(script.Parent:WaitForChild("BadgeManager"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local QuestUpdate = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
 local QuestComplete = Remotes:WaitForChild("QuestComplete") :: RemoteEvent
-local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
-local InventoryUpdated = Remotes:WaitForChild("InventoryUpdated") :: RemoteEvent
 local PlayerDamaged = Remotes:WaitForChild("PlayerDamaged") :: RemoteEvent
 
 -- Server bus (handled by InventoryManager) to drop reward items into inventory.
@@ -40,6 +37,25 @@ do
         grantItemBus = Instance.new("BindableEvent")
         grantItemBus.Name = "GrantItem"
         grantItemBus.Parent = sc
+    end
+end
+
+-- Server bus: tell InventoryManager the boss is dead so every plunger is removed.
+local poopDefeatedBus: BindableEvent
+do
+    local sc = ServerStorage:FindFirstChild("ServerComm")
+    if not sc then
+        sc = Instance.new("Folder")
+        sc.Name = "ServerComm"
+        sc.Parent = ServerStorage
+    end
+    local b = sc:FindFirstChild("PoopMonsterDefeated")
+    if b and b:IsA("BindableEvent") then
+        poopDefeatedBus = b
+    else
+        poopDefeatedBus = Instance.new("BindableEvent")
+        poopDefeatedBus.Name = "PoopMonsterDefeated"
+        poopDefeatedBus.Parent = sc
     end
 end
 
@@ -86,7 +102,7 @@ local function createPlayerQuests(): PlayerQuests
         chairHoarder = {
             id = "chair_hoarder",
             name = "The Chair Hoarder",
-            description = "Find 4 scattered chairs and bring them to the desperate devs.",
+            description = "Grab 4 folding chairs stashed around the ground floor before anyone else does.",
             progress = 0,
             target = 4,
             completed = false,
@@ -110,6 +126,10 @@ end
 local function sendQuestState(player: Player, quest: QuestState)
     QuestUpdate:FireClient(player, {
         id = quest.id,
+        -- ObjectivesUI row label (QuestUI reads name/description instead)
+        text = if quest.id == "chair_hoarder"
+            then string.format("Bonus: hoard folding chairs (%d/%d)", quest.progress, quest.target)
+            else nil,
         name = quest.name,
         description = quest.description,
         progress = quest.progress,
@@ -141,14 +161,13 @@ local function onChairPickup(player: Player)
         sendQuestState(player, quest)
 
         -- Reward: 2 Energy Bars
+        grantItemBus:Fire(player, "energy_bar", 2)
         QuestComplete:FireClient(player, {
             questId = quest.id,
             rewards = {
                 { itemId = "energy_bar", count = 2 },
             },
         })
-
-        -- TODO: Add items to player inventory via InventoryManager
     end
 end
 
@@ -456,6 +475,9 @@ local function damageBathroomMonster(player: Player, damage: number)
         bathroomMonsterAlive = false
         bossDefeated = true -- don't let the spawn loop bring it back
 
+        -- Every plunger vanishes now that the boss is dead.
+        poopDefeatedBus:Fire()
+
         -- Destroy model with explosion
         if bathroomMonsterModel then
             local torso = bathroomMonsterModel:FindFirstChild("Torso") :: BasePart?
@@ -526,7 +548,9 @@ local function flashMonster(color: Color3)
     torso.Color = color
     task.delay(0.25, function()
         local t = monsterTorso()
-        if t then t.Color = original end
+        if t then
+            t.Color = original
+        end
     end)
 end
 
@@ -546,14 +570,12 @@ local function onWeaponUsedNearMonster(player: Player, itemId: string, kind: str
         flashMonster(Color3.fromRGB(180, 220, 90))
         damageBathroomMonster(player, itemId == "axe_spray" and 12 or 5)
     elseif itemId == "plunger" then
-        if os.clock() < monsterStaggerUntil then
-            -- Plunging a staggered monster: the real damage.
+        -- Classic-sword slash: a forward swing that bites the monster directly, no
+        -- spray-stagger required. The player just has to be close and facing it.
+        local toMonster = torso.Position - root.Position
+        if toMonster.Magnitude <= 12 and root.CFrame.LookVector:Dot(toMonster.Unit) > 0.2 then
             flashMonster(Color3.fromRGB(255, 240, 120))
-            damageBathroomMonster(player, 30)
-        else
-            -- Not staggered — it just shrugs off the plunger.
-            flashMonster(Color3.fromRGB(150, 80, 60))
-            damageBathroomMonster(player, 3)
+            damageBathroomMonster(player, 20)
         end
     elseif kind == "melee" then
         -- Other melee weapons barely scratch it.
@@ -592,19 +614,27 @@ Players.PlayerRemoving:Connect(function(player: Player)
     playerQuests[player] = nil
 end)
 
--- Quest interactions
-QuestUpdate.OnServerEvent:Connect(function(player: Player, data: { action: string, questId: string? })
-    if data.action == "pickup_chair" then
-        onChairPickup(player)
-    elseif data.action == "attack_monster" then
-        damageBathroomMonster(player, 20) -- deodorant damage to boss
+-- Chair pickups arrive from InteractionManager's prompt handler, never from a
+-- client remote, so the reward can't be farmed by firing the remote.
+do
+    local serverComm = ServerStorage:FindFirstChild("ServerComm")
+    if not serverComm then
+        serverComm = Instance.new("Folder")
+        serverComm.Name = "ServerComm"
+        serverComm.Parent = ServerStorage
     end
-end)
-
--- Phase tracking
-GameStateChanged.OnServerEvent:Connect(function(player: Player, data: { phase: number })
-    -- This shouldn't be fired from client; phase changes come from server
-end)
+    local bus = serverComm:FindFirstChild("QuestItemCollected")
+    if not (bus and bus:IsA("BindableEvent")) then
+        bus = Instance.new("BindableEvent")
+        bus.Name = "QuestItemCollected"
+        bus.Parent = serverComm
+    end
+    ;(bus :: BindableEvent).Event:Connect(function(player: Player, questId: string)
+        if typeof(player) == "Instance" and questId == "chair_hoarder" then
+            onChairPickup(player)
+        end
+    end)
+end
 
 -- Spawn boss when Day2 starts — exactly once. Once it's been defeated it stays
 -- dead; the flag only resets for a fresh match (back at lobby / Day1).
@@ -622,7 +652,6 @@ end)
 
 -- Listen for phase changes from GameStateManager
 -- The GameStateManager broadcasts phase changes; we track it here
-local gameStateChangedServer = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 
 -- We need a way to know the current phase on the server. We'll use a module approach:
 -- For now, track via attribute on a shared value
@@ -633,6 +662,14 @@ task.spawn(function()
             currentPhase = phaseValue.Value
             phaseValue.Changed:Connect(function(newPhase)
                 currentPhase = newPhase
+                -- New match: the chairs go back out (InteractionManager), so the
+                -- race starts over for everyone.
+                if newPhase == GameConfig.Phase.DAY1 then
+                    for p, quests in playerQuests do
+                        quests.chairHoarder = createPlayerQuests().chairHoarder
+                        sendQuestState(p, quests.chairHoarder)
+                    end
+                end
             end)
             break
         end

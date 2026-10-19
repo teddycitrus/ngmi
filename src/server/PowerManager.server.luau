@@ -11,19 +11,22 @@
 --     (partially) and flags the floor's power as restored — which is when that
 --     floor's work (coding at your desk, server repairs) can resume.
 --
--- It identifies which panel was repaired by proximity to the repairing player, so
--- it needs no changes to the panel UI or unique panel ids. It exposes per-floor
--- power as workspace attributes (FloorPower0/1/2) for other systems to gate on.
+-- A repair counts only for the panel InteractionManager opened the puzzle on
+-- (see Wiring). Per-floor power is exposed as workspace attributes
+-- (FloorPower0/1/2) for other systems to gate on; the sabotage brown-out lives
+-- in Power/Flicker.
 --------------------------------------------------------------------------------
 
-local Players           = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage     = game:GetService("ServerStorage")
+local ServerStorage = game:GetService("ServerStorage")
 local CollectionService = game:GetService("CollectionService")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local TAGS = GameConfig.TAGS
 local NIGHT2 = GameConfig.Phase.NIGHT2
+
+local Flicker = require(script.Parent:WaitForChild("Power"):WaitForChild("Flicker"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local PanelRepaired = Remotes:WaitForChild("PanelRepaired") :: RemoteEvent
@@ -32,7 +35,16 @@ local QuestUpdate = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
 --- Push an objective's live state to every client's objectives panel.
 local function fireObjective(id: string, text: string, completed: boolean)
 	for _, plr in Players:GetPlayers() do
-		QuestUpdate:FireClient(plr, { id = id, name = id, description = "", progress = completed and 1 or 0, target = 1, completed = completed, active = true, text = text })
+		QuestUpdate:FireClient(plr, {
+			id = id,
+			name = id,
+			description = "",
+			progress = completed and 1 or 0,
+			target = 1,
+			completed = completed,
+			active = true,
+			text = text,
+		})
 	end
 end
 
@@ -43,17 +55,17 @@ end
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
-type LightState = {
-	part: BasePart,
-	light: PointLight?,
-	brightness: number,
-	color: Color3,
-	material: Enum.Material,
-	floor: number,
-	on: boolean,
-}
+type LightState = Flicker.LightState
 type PanelState = { part: BasePart, floor: number, fixed: boolean, highlight: Highlight? }
-type ServerState = { model: Model, body: BasePart, prompt: ProximityPrompt, status: BasePart?, floor: number, fixed: boolean, highlight: Highlight? }
+type ServerState = {
+	model: Model,
+	body: BasePart,
+	prompt: ProximityPrompt,
+	status: BasePart?,
+	floor: number,
+	fixed: boolean,
+	highlight: Highlight?,
+}
 
 local lights: { LightState } = {}
 local panels: { PanelState } = {}
@@ -101,6 +113,7 @@ local function gatherLights()
 				part = p,
 				light = pl,
 				brightness = pl and pl.Brightness or 1,
+				level = 1,
 				color = p.Color,
 				material = p.Material,
 				floor = floorIndex(p.Position.Y),
@@ -117,6 +130,7 @@ local function setLight(ls: LightState, mode: string)
 		end
 		ls.part.Material = Enum.Material.SmoothPlastic
 		ls.part.Color = OFF_COLOR
+		ls.level = 0
 		ls.on = false
 	elseif mode == "backup" then
 		if ls.light then
@@ -125,6 +139,7 @@ local function setLight(ls: LightState, mode: string)
 		end
 		ls.part.Material = Enum.Material.Neon
 		ls.part.Color = BACKUP_COLOR
+		ls.level = 0.35
 		ls.on = true
 	else -- "floor": fuller (but still partial) restoration
 		if ls.light then
@@ -133,6 +148,7 @@ local function setLight(ls: LightState, mode: string)
 		end
 		ls.part.Material = Enum.Material.Neon
 		ls.part.Color = ls.color
+		ls.level = 0.6
 		ls.on = true
 	end
 end
@@ -145,6 +161,7 @@ local function restoreAllLights()
 		end
 		ls.part.Material = ls.material
 		ls.part.Color = ls.color
+		ls.level = 1
 		ls.on = true
 	end
 end
@@ -285,7 +302,14 @@ local function restoreFloorPower(f: number)
 
 	workspace:SetAttribute("FloorPower" .. f, true)
 	enableFloorServers(f)
-	print(string.format("[PowerManager] Floor %d power restored (partial — %d/%d lights) — work can resume here.", f, litCount, #floorLights))
+	print(
+		string.format(
+			"[PowerManager] Floor %d power restored (partial, %d/%d lights), work can resume here.",
+			f,
+			litCount,
+			#floorLights
+		)
+	)
 end
 
 --- Apply a repair to a specific panel: backup lights + objective + floor check.
@@ -332,7 +356,7 @@ local function applyPanelFix(best: PanelState)
 	end
 end
 
---- Repair a specific panel instance (used by the server bus — exact identity).
+--- Repair a specific panel instance (the one the puzzle was opened on).
 local function fixPanelByPart(part: Instance)
 	for _, panel in panels do
 		if panel.part == part and not panel.fixed then
@@ -342,57 +366,56 @@ local function fixPanelByPart(part: Instance)
 	end
 end
 
---- Repair the unfixed panel closest to the player (wire-puzzle solve path).
-local function fixNearestPanel(player: Player)
-	local char = player.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if not hrp or not hrp:IsA("BasePart") then
-		return
-	end
-	local best: PanelState? = nil
-	local bestD = 30
-	for _, panel in panels do
-		if not panel.fixed then
-			local d = (panel.part.Position - hrp.Position).Magnitude
-			if d < bestD then
-				bestD = d
-				best = panel
-			end
-		end
-	end
-	if best then
-		applyPanelFix(best)
-	end
-end
-
 --------------------------------------------------------------------------------
 -- Wiring
 --------------------------------------------------------------------------------
--- Wire-puzzle solve fires PanelRepaired:FireServer (no panel id) → nearest panel.
-PanelRepaired.OnServerEvent:Connect(function(player: Player, ...)
-	if active then
-		fixNearestPanel(player)
-	end
-end)
+-- The puzzle runs on the client, so its "solved" report is only accepted for
+-- the panel InteractionManager opened it on (prompt range, wall check), from
+-- that player, once, no sooner than PUZZLE_MIN_SECONDS and while still nearby.
+local PUZZLE_MIN_SECONDS = 1.5
+local PUZZLE_MAX_SECONDS = 180
+local PUZZLE_REACH = 16
+local openPuzzles: { [Player]: { part: BasePart, openedAt: number } } = {}
 
--- The InteractionManager "Repair" prompt fires this bus with the EXACT panel.
 do
 	local serverComm = ServerStorage:WaitForChild("ServerComm")
-	local found = serverComm:FindFirstChild("PanelFixed")
-	local panelFixedBus: BindableEvent
+	local found = serverComm:FindFirstChild("PanelPuzzleOpened")
+	local bus: BindableEvent
 	if found and found:IsA("BindableEvent") then
-		panelFixedBus = found
+		bus = found
 	else
-		panelFixedBus = Instance.new("BindableEvent")
-		panelFixedBus.Name = "PanelFixed"
-		panelFixedBus.Parent = serverComm
+		bus = Instance.new("BindableEvent")
+		bus.Name = "PanelPuzzleOpened"
+		bus.Parent = serverComm
 	end
-	panelFixedBus.Event:Connect(function(panelInstance: Instance)
-		if active and typeof(panelInstance) == "Instance" then
-			fixPanelByPart(panelInstance)
+	bus.Event:Connect(function(player: Player, part: Instance)
+		if typeof(part) == "Instance" and part:IsA("BasePart") then
+			openPuzzles[player] = { part = part, openedAt = os.clock() }
 		end
 	end)
 end
+
+PanelRepaired.OnServerEvent:Connect(function(player: Player, panelId: unknown)
+	local session = openPuzzles[player]
+	openPuzzles[player] = nil
+	if not (active and session) or panelId ~= session.part.Name then
+		return
+	end
+	local elapsed = os.clock() - session.openedAt
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if elapsed < PUZZLE_MIN_SECONDS or elapsed > PUZZLE_MAX_SECONDS then
+		return
+	end
+	if not (hrp and hrp:IsA("BasePart")) or (hrp.Position - session.part.Position).Magnitude > PUZZLE_REACH then
+		return
+	end
+	fixPanelByPart(session.part)
+end)
+
+Players.PlayerRemoving:Connect(function(player: Player)
+	openPuzzles[player] = nil
+end)
 
 local function onNight()
 	active = true
@@ -445,5 +468,27 @@ task.spawn(function()
 			onLeaveNight()
 		end
 	end)
+
+	-- Sabotage flicker signal. The SabotageEvent RemoteEvent can't be used here
+	-- (a server script cannot receive its own FireClient), so GameStateManager
+	-- publishes power sabotages server-side on the same ServerComm bus that
+	-- already carries PhaseChanged and CorruptionTriggered.
+	--
+	-- Created here if absent so load order between this and the senders is
+	-- irrelevant, matching how every other script on this bus behaves.
+	local sabotageBus = serverComm:FindFirstChild("SabotageTriggered")
+	if not (sabotageBus and sabotageBus:IsA("BindableEvent")) then
+		local created = Instance.new("BindableEvent")
+		created.Name = "SabotageTriggered"
+		created.Parent = serverComm
+		sabotageBus = created
+	end
+	(sabotageBus :: BindableEvent).Event:Connect(function(floor: number?, duration: number?)
+		if not active then
+			return -- only meaningful once the venue is on night power
+		end
+		Flicker.start(lights, duration or Flicker.DEFAULT_SECONDS, floor)
+	end)
+
 	print("[PowerManager] Ready — waiting for NIGHT2.")
 end)

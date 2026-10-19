@@ -14,6 +14,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
 
 local ItemConfig = require(ReplicatedStorage.Shared.ItemConfig)
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
@@ -27,6 +28,7 @@ local InventoryUpdated = Remotes:WaitForChild("InventoryUpdated") :: RemoteEvent
 local DeodorantSpray = Remotes:WaitForChild("DeodorantSpray") :: RemoteEvent
 local FlashlightRecharge = Remotes:WaitForChild("FlashlightRecharge") :: RemoteEvent
 local EnergyRefilled = Remotes:WaitForChild("EnergyRefilled") :: RemoteEvent
+local EquipItem = Remotes:WaitForChild("EquipItem") :: RemoteEvent
 
 -- Server bus: announce a weapon use so QuestManager (Poop Monster fight) can
 -- react to deodorant/plunger swings without the fragile client-targeting path.
@@ -94,9 +96,16 @@ type PlayerInventory = { InventorySlot? } -- 4 slots, nil = empty
 -- State
 --------------------------------------------------------------------------------
 
-local INVENTORY_SLOTS = GameConfig.Player.inventorySlots or 4
--- Override to 4 as specified in the game design (GameConfig has 6 but design says 4)
+-- 4 as specified in the game design (GameConfig has 6 but design says 4)
 local MAX_SLOTS = 4
+
+-- Server-side pacing for weapon uses. Each accepted use fires WeaponUsed (boss
+-- damage, NGMI hit confirmation) and a DeodorantSpray broadcast to every
+-- client, so a forged UseItem loop must not be able to repeat it faster than a
+-- real swing or spray. Melee matches the plunger slash (0.08 s in, 0.2 s back)
+-- plus a beat; sprays are also bounded by ammo.
+local WEAPON_COOLDOWN: { [string]: number } = { melee = 0.5, spray = 0.4 }
+local lastWeaponUse: { [Player]: number } = {}
 
 local playerInventories: { [Player]: PlayerInventory } = {}
 
@@ -215,9 +224,229 @@ local function removeItem(player: Player, slotIndex: number): boolean
 	return true
 end
 
---- Get a player's inventory
-local function getInventory(player: Player): PlayerInventory?
-	return playerInventories[player]
+--------------------------------------------------------------------------------
+-- Held plunger (server-side, replicated to everyone)
+-- The plunger is a classic-sword melee weapon. While a player has it selected
+-- (the client tells us via EquipItem) we weld a plunger model into their right
+-- hand so EVERY client sees it. Using it (click/tap) swings it forward, and the
+-- swing is server-driven so it replicates too. Once the Poop Monster dies, every
+-- plunger is wiped from the game.
+--------------------------------------------------------------------------------
+
+local heldPlungers: { [Player]: Model } = {}
+local plungerWelds: { [Player]: Weld } = {}
+local plungerSwinging: { [Player]: boolean } = {}
+local equippedPlunger: { [Player]: boolean } = {}
+local plungersBanished = false -- set once the boss dies; no plunger may reappear
+
+local PLUNGER_GRIP = CFrame.new(0, -0.1, -1.0) * CFrame.Angles(math.rad(-95), 0, 0)
+local PLUNGER_SLASH = CFrame.new(0, 0.25, -1.1) * CFrame.Angles(math.rad(-172), 0, 0)
+
+local function hasPlunger(player: Player): boolean
+	local inv = playerInventories[player]
+	if not inv then
+		return false
+	end
+	for i = 1, MAX_SLOTS do
+		local slot = inv[i]
+		if slot and slot.itemId == "plunger" then
+			return true
+		end
+	end
+	return false
+end
+
+local function buildPlungerModel(): Model
+	local model = Instance.new("Model")
+	model.Name = "HeldPlunger"
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.new(0.18, 2.1, 0.18)
+	handle.Color = Color3.fromRGB(120, 80, 45)
+	handle.Material = Enum.Material.Wood
+	handle.CanCollide = false
+	handle.CanQuery = false
+	handle.CanTouch = false
+	handle.Massless = true
+	handle.Parent = model
+
+	local cup = Instance.new("Part")
+	cup.Name = "Cup"
+	cup.Shape = Enum.PartType.Ball
+	cup.Size = Vector3.new(0.9, 0.8, 0.9)
+	cup.Color = Color3.fromRGB(150, 45, 45)
+	cup.Material = Enum.Material.SmoothPlastic
+	cup.CanCollide = false
+	cup.CanQuery = false
+	cup.CanTouch = false
+	cup.Massless = true
+	cup.Parent = model
+
+	local cupWeld = Instance.new("Weld")
+	cupWeld.Part0 = handle
+	cupWeld.Part1 = cup
+	cupWeld.C0 = CFrame.new(0, 1.0, 0)
+	cupWeld.Parent = cup
+
+	model.PrimaryPart = handle
+	return model
+end
+
+local function getRightHand(char: Model): BasePart?
+	local h = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+	return h :: BasePart?
+end
+
+local function detachPlunger(player: Player)
+	local model = heldPlungers[player]
+	if model then
+		model:Destroy()
+	end
+	heldPlungers[player] = nil
+	plungerWelds[player] = nil
+	plungerSwinging[player] = nil
+end
+
+local function attachPlunger(player: Player)
+	if plungersBanished or heldPlungers[player] then
+		return
+	end
+	if not hasPlunger(player) then
+		return
+	end
+	local char = player.Character
+	if not char then
+		return
+	end
+	local hand = getRightHand(char)
+	if not hand then
+		return
+	end
+
+	local model = buildPlungerModel()
+	local handle = model.PrimaryPart :: BasePart
+	local weld = Instance.new("Weld")
+	weld.Part0 = hand
+	weld.Part1 = handle
+	weld.C0 = PLUNGER_GRIP
+	weld.Parent = handle
+	model.Parent = char
+
+	heldPlungers[player] = model
+	plungerWelds[player] = weld
+end
+
+--- Show or stow the plunger based on what the player currently has selected.
+local function refreshPlunger(player: Player)
+	if equippedPlunger[player] and not plungersBanished and hasPlunger(player) then
+		attachPlunger(player)
+	else
+		detachPlunger(player)
+	end
+end
+
+--- Server-driven forward slash (replicates to every client).
+local function swingPlunger(player: Player)
+	local weld = plungerWelds[player]
+	if not weld or plungerSwinging[player] then
+		return
+	end
+	plungerSwinging[player] = true
+	local swing = TweenService:Create(weld, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+		C0 = PLUNGER_SLASH,
+	})
+	swing:Play()
+	swing.Completed:Once(function()
+		local recover = TweenService:Create(weld, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			C0 = PLUNGER_GRIP,
+		})
+		recover:Play()
+		recover.Completed:Once(function()
+			plungerSwinging[player] = false
+		end)
+	end)
+end
+
+--- Wipe every plunger from the game once the Poop Monster is defeated.
+local function banishAllPlungers()
+	if plungersBanished then
+		return
+	end
+	plungersBanished = true
+	for _, plr in Players:GetPlayers() do
+		detachPlunger(plr)
+		local inv = playerInventories[plr]
+		if inv then
+			local changed = false
+			for i = 1, MAX_SLOTS do
+				local slot = inv[i]
+				if slot and slot.itemId == "plunger" then
+					inv[i] = nil
+					changed = true
+				end
+			end
+			if changed then
+				syncInventory(plr)
+			end
+		end
+	end
+	-- Sweep any plunger pickups still lying in the world.
+	for id, model in worldItems do
+		local part = model.PrimaryPart
+		if part and part:GetAttribute("ItemId") == "plunger" then
+			model:Destroy()
+			worldItems[id] = nil
+		end
+	end
+end
+
+-- The client tells us which item it currently has selected. Each change can
+-- rebuild the held plunger, so changes are applied at most every
+-- EQUIP_INTERVAL; one arriving sooner is deferred (never dropped), so the
+-- server always ends on the client's latest selection.
+local EQUIP_INTERVAL = 0.15
+local lastEquipApply: { [Player]: number } = {}
+local pendingEquip: { [Player]: boolean } = {}
+
+local function applyEquip(player: Player)
+	local wantsPlunger = pendingEquip[player]
+	pendingEquip[player] = nil
+	if wantsPlunger == nil or not player.Parent then
+		return
+	end
+	lastEquipApply[player] = os.clock()
+	equippedPlunger[player] = wantsPlunger
+	refreshPlunger(player)
+end
+
+EquipItem.OnServerEvent:Connect(function(player: Player, data: any)
+	local itemId = typeof(data) == "table" and data.itemId or nil
+	local alreadyQueued = pendingEquip[player] ~= nil
+	pendingEquip[player] = (itemId == "plunger")
+	if alreadyQueued then
+		return
+	end
+	local wait = EQUIP_INTERVAL - (os.clock() - (lastEquipApply[player] or 0))
+	if wait <= 0 then
+		applyEquip(player)
+	else
+		task.delay(wait, applyEquip, player)
+	end
+end)
+
+-- React to the Poop Monster dying (QuestManager fires this on ServerComm).
+do
+	local found = serverComm:FindFirstChild("PoopMonsterDefeated")
+	local bus: BindableEvent
+	if found and found:IsA("BindableEvent") then
+		bus = found
+	else
+		bus = Instance.new("BindableEvent")
+		bus.Name = "PoopMonsterDefeated"
+		bus.Parent = serverComm
+	end
+	bus.Event:Connect(banishAllPlungers)
 end
 
 --------------------------------------------------------------------------------
@@ -294,6 +523,11 @@ local function useMeleeItem(player: Player, _slotIndex: number, _slot: Inventory
 
 	-- Let the Poop Monster fight react to the swing (the plunger's damage).
 	WeaponUsedBus:Fire(player, def.id, "melee")
+
+	-- The plunger swings like a sword; server-driven so every client sees it.
+	if def.id == "plunger" then
+		swingPlunger(player)
+	end
 end
 
 --- Main use item handler
@@ -309,6 +543,15 @@ local function useItem(player: Player, slotIndex: number)
 	if not def or not def.isUsable then return end
 
 	local effect = def.useEffect
+	local cooldown = effect and WEAPON_COOLDOWN[effect]
+	if cooldown then
+		local now = os.clock()
+		if now - (lastWeaponUse[player] or -math.huge) < cooldown then
+			return
+		end
+		lastWeaponUse[player] = now
+	end
+
 	if effect == "spray" then
 		useSprayItem(player, slotIndex, slot, def)
 	elseif effect == "speed_buff" then
@@ -616,6 +859,17 @@ Players.PlayerAdded:Connect(function(player: Player)
 	task.delay(1, function()
 		syncInventory(player)
 	end)
+
+	-- Re-weld the held plunger onto each fresh character (the old model dies with
+	-- the old one). equippedPlunger persists across respawns.
+	player.CharacterAdded:Connect(function(char)
+		detachPlunger(player)
+		task.spawn(function()
+			char:WaitForChild("HumanoidRootPart", 10)
+			task.wait(0.2)
+			refreshPlunger(player)
+		end)
+	end)
 end)
 
 Players.PlayerRemoving:Connect(function(player: Player)
@@ -626,6 +880,11 @@ Players.PlayerRemoving:Connect(function(player: Player)
 			task.cancel(buffThread)
 		end
 	end
+	detachPlunger(player)
+	equippedPlunger[player] = nil
+	lastWeaponUse[player] = nil
+	lastEquipApply[player] = nil
+	pendingEquip[player] = nil
 	activeBuffs[player] = nil
 	playerInventories[player] = nil
 end)

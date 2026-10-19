@@ -8,7 +8,7 @@
 --
 -- This is deliberately self-contained: it derives completion from things it can
 -- observe directly (player positions, the ProjectCompletion attribute that
--- CodingGameServer publishes, the PickupItem / NPCDialogueChoice remotes, and the
+-- CodingGameServer publishes, the ItemPickedUp / NPCTalked server buses, and the
 -- BathroomMonster tag) so it needs almost no hooks in other systems. Objective
 -- check-offs are pushed to the client objectives panel via the QuestUpdate remote.
 --
@@ -29,7 +29,6 @@ local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local QuestUpdate        = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
-local NPCDialogueChoice  = Remotes:WaitForChild("NPCDialogueChoice") :: RemoteEvent
 
 local DAY1 = GameConfig.Phase.DAY1
 local DAY2 = GameConfig.Phase.DAY2
@@ -120,9 +119,9 @@ local function objText(id: string): string
 	elseif id == "explore_rooms" then
 		return string.format("Explore all 3 floors (%d/%d)", math.min(floorsCount, FLOOR_TARGET), FLOOR_TARGET)
 	elseif id == "poop_monster" then
-		return "★ Bonus: defeat the Bathroom Monster"
+		return "Bonus: defeat the Bathroom Monster"
 	elseif id == "fix_computer" then
-		return "★ Bonus: fix a frozen PC"
+		return "Bonus: fix a frozen PC"
 	end
 	return id
 end
@@ -309,17 +308,19 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 end)
 
--- talk to staff (any dialogue response counts the NPC once)
-NPCDialogueChoice.OnServerEvent:Connect(function(_player: Player, data: any)
+-- talk to staff (any dialogue response counts the NPC once). NPCManager fires
+-- NPCTalked only after checking the player really is talking to that NPC, so
+-- made-up npcIds from a client can't tick the objective.
+ensureBindable("NPCTalked").Event:Connect(function(_player: Player, npcId: string)
 	if not active or phase ~= DAY1 or done.talk_npcs then
 		return
 	end
-	if typeof(data) ~= "table" or typeof(data.npcId) ~= "string" then
+	if typeof(npcId) ~= "string" then
 		return
 	end
 	pokeActivity() -- mid-conversation → hold off on advancing
-	if not talkedNpcs[data.npcId] then
-		talkedNpcs[data.npcId] = true
+	if not talkedNpcs[npcId] then
+		talkedNpcs[npcId] = true
 		talkedCount += 1
 		fireObjective("talk_npcs", false)
 		if talkedCount >= TALK_TARGET then

@@ -23,7 +23,32 @@ local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CodingProgress = Remotes:WaitForChild("CodingProgress") :: RemoteEvent
 local HidingStateChanged = Remotes:WaitForChild("HidingStateChanged") :: RemoteEvent
 local OpenPanelPuzzle = Remotes:WaitForChild("OpenPanelPuzzle") :: RemoteEvent
-local QuestUpdate = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
+
+local function serverBus(name: string): BindableEvent
+	local serverComm = ServerStorage:FindFirstChild("ServerComm")
+	if not serverComm then
+		serverComm = Instance.new("Folder")
+		serverComm.Name = "ServerComm"
+		serverComm.Parent = ServerStorage
+	end
+	local found = serverComm:FindFirstChild(name)
+	if found and found:IsA("BindableEvent") then
+		return found
+	end
+	local bus = Instance.new("BindableEvent")
+	bus.Name = name
+	bus.Parent = serverComm
+	return bus
+end
+
+-- Server bus to QuestManager: a player picked up a quest item. (player, questId)
+-- Quest progress must come from here, never from a client remote.
+local QuestItemCollectedBus = serverBus("QuestItemCollected")
+
+-- Server bus to PowerManager: this player was handed the rewiring puzzle for
+-- this panel. (player, panelPart) PowerManager only accepts a PanelRepaired
+-- from that player, for that panel, after this.
+local PanelPuzzleOpenedBus = serverBus("PanelPuzzleOpened")
 
 --------------------------------------------------------------------------------
 -- Types
@@ -50,7 +75,7 @@ local PROMPT_SETTINGS = {
 -- Which interaction types are allowed in each phase
 local PHASE_INTERACTIONS: { [number]: { InteractionType } } = {
 	[0] = {},                                                                      -- LOBBY
-	[1] = { "item_pickup", "desk_coding", "quest_item" },                          -- DAY1
+	[1] = { "item_pickup", "desk_coding" },                                        -- DAY1
 	[2] = { "item_pickup", "desk_coding", "quest_item" },                          -- DAY2
 	[3] = { "item_pickup", "desk_coding", "quest_item", "hiding_spot", "electrical_panel" }, -- NIGHT2
 	[4] = {}, -- DAY3: cutscene, no interactions
@@ -141,7 +166,7 @@ function updatePromptState(record: PromptRecord)
 		end
 	end
 
-	record.prompt.Enabled = isAllowed
+	record.prompt.Enabled = isAllowed and not record.instance:GetAttribute("Collected")
 end
 
 --- Update all registered prompts when phase changes
@@ -204,6 +229,7 @@ local function handleHidingSpot(player: Player, spotInstance: Instance)
 	if hidingPlayers[player] then
 		-- Player is already hiding — unhide
 		hidingPlayers[player] = nil
+		player:SetAttribute("Hiding", nil)
 
 		-- Restore visibility
 		local character = player.Character
@@ -232,15 +258,17 @@ local function handleHidingSpot(player: Player, spotInstance: Instance)
 		})
 	else
 		-- Check if spot is already occupied
-		for otherPlayer, otherSpot in hidingPlayers do
+		for _, otherSpot in hidingPlayers do
 			if otherSpot == spotInstance then
 				-- Spot is taken
 				return
 			end
 		end
 
-		-- Hide the player
+		-- Hide the player. The attribute is what NGMIController and
+		-- SurvivalManager read; only the server can set it.
 		hidingPlayers[player] = spotInstance
+		player:SetAttribute("Hiding", true)
 
 		-- Make character semi-invisible
 		local character = player.Character
@@ -304,7 +332,22 @@ local function handleElectricalPanel(player: Player, panelInstance: Instance)
 	if wallBetween(player, panelInstance) then return end
 
 	-- Hand off to the client to run the wire-reconnection mini-game.
+	PanelPuzzleOpenedBus:Fire(player, panelInstance)
 	OpenPanelPuzzle:FireClient(player, { panelId = panelInstance.Name })
+end
+
+--- Show or hide a quest item. Its decorative parts (chair legs, back) are
+--- children of the tagged part, so hiding walks the descendants.
+local function setQuestItemShown(item: Instance, shown: boolean)
+	if item:IsA("BasePart") then
+		item.Transparency = if shown then 0 else 1
+		item.CanCollide = shown
+	end
+	for _, d in item:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.Transparency = if shown then 0 else 1
+		end
+	end
 end
 
 --- QuestChair — quest item pickup
@@ -319,11 +362,7 @@ local function handleQuestItem(player: Player, chairInstance: Instance)
 	if alreadyCollected then return end
 
 	chairInstance:SetAttribute("Collected", true)
-
-	-- Visual feedback — dim the object
-	if chairInstance:IsA("BasePart") then
-		chairInstance.Transparency = 0.5
-	end
+	setQuestItemShown(chairInstance, false)
 
 	-- Disable prompt
 	local prompt = chairInstance:FindFirstChildOfClass("ProximityPrompt")
@@ -331,14 +370,19 @@ local function handleQuestItem(player: Player, chairInstance: Instance)
 		prompt.Enabled = false
 	end
 
-	-- Notify player
-	QuestUpdate:FireClient(player, {
-		action = "item_collected",
-		questId = questId,
-		itemName = chairInstance:GetAttribute("ItemName") or chairInstance.Name,
-	})
-
+	QuestItemCollectedBus:Fire(player, questId)
 	print("[InteractionManager] Quest item collected:", questId, "by", player.Name)
+end
+
+--- A new match puts every collected quest item back. The map is built once per
+--- server, so without this the chairs stay gone after the first match.
+local function resetQuestItems()
+	for _, item in CollectionService:GetTagged(GameConfig.TAGS.QUEST_CHAIR) do
+		if item:GetAttribute("Collected") then
+			item:SetAttribute("Collected", nil)
+			setQuestItemShown(item, true)
+		end
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -448,11 +492,15 @@ end
 
 local function onPhaseChanged(newPhase: number)
 	currentPhase = newPhase
+	if newPhase == GameConfig.Phase.DAY1 then
+		resetQuestItems()
+	end
 	updateAllPromptStates()
 
 	-- Clear hiding state on phase change (players auto-unhide)
 	if newPhase ~= 3 then -- not NIGHT2
 		for player, _ in hidingPlayers do
+			player:SetAttribute("Hiding", nil)
 			-- Restore visibility
 			local character = player.Character
 			if character then
@@ -516,6 +564,11 @@ end
 --------------------------------------------------------------------------------
 -- Player cleanup
 --------------------------------------------------------------------------------
+
+-- HeartbeatMinigame reports how its rhythm game ended. Hiding is decided here,
+-- by the prompt, never by the client, so the report is drained and ignored
+-- (a listener keeps it from piling up in the remote's queue).
+HidingStateChanged.OnServerEvent:Connect(function() end)
 
 Players.PlayerRemoving:Connect(function(player: Player)
 	hidingPlayers[player] = nil

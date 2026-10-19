@@ -29,9 +29,6 @@ local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CodingTaskCompleteRemote = Remotes:WaitForChild("CodingTaskComplete") :: RemoteEvent
 local CodingProgressRemote = Remotes:WaitForChild("CodingProgress") :: RemoteEvent
-local PanelRepairedRemote = Remotes:WaitForChild("PanelRepaired") :: RemoteEvent
-local SabotageEventRemote = Remotes:WaitForChild("SabotageEvent") :: RemoteEvent
-local GameStateChangedRemote = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 local QuestUpdateRemote = Remotes:WaitForChild("QuestUpdate") :: RemoteEvent
 
 ----------------------------------------------------------------------
@@ -387,60 +384,6 @@ local function onCodingTaskComplete(player: Player, payload: any): ()
 end
 
 ----------------------------------------------------------------------
--- Sabotage / Power System
-----------------------------------------------------------------------
-
---[[
-	When a sabotage event fires (PowerOutage), block all players' coding
-	in the affected zone. In this simplified version, all players are
-	blocked since we have a single venue.
-]]
-local function onSabotageEvent(_player: Player?, sabotageData: any): ()
-	if typeof(sabotageData) ~= "table" then
-		return
-	end
-
-	local sabotageType = sabotageData.sabotageType
-	if sabotageType ~= "PowerOutage" and sabotageType ~= "ServerCrash" then
-		return -- only power-related sabotages block coding
-	end
-
-	print("[CodingGameServer] Power sabotage! Blocking all coding progress.")
-
-	for userId, state in playerStates do
-		state.blocked = true
-
-		-- Notify each affected player
-		local player = Players:GetPlayerByUserId(userId)
-		if player then
-			CodingProgressRemote:FireClient(player, {
-				completion = state.completion,
-				blocked = true,
-				taskCount = state.taskCount,
-			})
-		end
-	end
-end
-
---[[
-	When a panel is repaired, unblock coding for all players.
-	A more advanced version could track zones, but for the hackathon
-	venue a single zone is sufficient.
-]]
-local function onPanelRepaired(_player: Player?): ()
-	print("[CodingGameServer] Panel repaired. Unblocking coding progress.")
-
-	for userId, state in playerStates do
-		state.blocked = false
-
-		local player = Players:GetPlayerByUserId(userId)
-		if player then
-			sendProgressUpdate(player, state)
-		end
-	end
-end
-
-----------------------------------------------------------------------
 -- Phase Transition Handling
 ----------------------------------------------------------------------
 
@@ -546,12 +489,6 @@ end)
 
 -- Listen for task completions from clients
 CodingTaskCompleteRemote.OnServerEvent:Connect(onCodingTaskComplete)
-
--- Listen for sabotage events (server-side, fired by SabotageManager)
-SabotageEventRemote.OnServerEvent:Connect(onSabotageEvent)
-
--- Listen for panel repairs
-PanelRepairedRemote.OnServerEvent:Connect(onPanelRepaired)
 
 -- Listen for phase changes via the server phase bus (not a client remote).
 do

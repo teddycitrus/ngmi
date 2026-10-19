@@ -9,11 +9,11 @@
 -- evaluation.
 --------------------------------------------------------------------------------
 
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
-local ServerStorage   = game:GetService("ServerStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local DebugConfig = require(ReplicatedStorage.Shared.DebugConfig)
@@ -25,16 +25,16 @@ local BadgeManager = require(script.Parent:WaitForChild("BadgeManager"))
 --------------------------------------------------------------------------------
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 
-local GameStateChanged   = Remotes:WaitForChild("GameStateChanged")   :: RemoteEvent
-local PhaseTimerSync     = Remotes:WaitForChild("PhaseTimerSync")     :: RemoteEvent
-local CorruptionStarted  = Remotes:WaitForChild("CorruptionStarted")  :: RemoteEvent
-local PlayerDamaged      = Remotes:WaitForChild("PlayerDamaged")      :: RemoteEvent
-local PlayerDied         = Remotes:WaitForChild("PlayerDied")         :: RemoteEvent
-local PlayerRespawn      = Remotes:WaitForChild("PlayerRespawn")      :: RemoteEvent
-local CutsceneTrigger    = Remotes:WaitForChild("CutsceneTrigger")    :: RemoteEvent
-local EndingTrigger      = Remotes:WaitForChild("EndingTrigger")      :: RemoteEvent
-local SabotageEvent      = Remotes:WaitForChild("SabotageEvent")      :: RemoteEvent
-local AdminCommand       = Remotes:WaitForChild("AdminCommand")       :: RemoteEvent
+local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
+local PhaseTimerSync = Remotes:WaitForChild("PhaseTimerSync") :: RemoteEvent
+local CorruptionStarted = Remotes:WaitForChild("CorruptionStarted") :: RemoteEvent
+local PlayerDamaged = Remotes:WaitForChild("PlayerDamaged") :: RemoteEvent
+local PlayerDied = Remotes:WaitForChild("PlayerDied") :: RemoteEvent
+local PlayerRespawn = Remotes:WaitForChild("PlayerRespawn") :: RemoteEvent
+local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
+local EndingTrigger = Remotes:WaitForChild("EndingTrigger") :: RemoteEvent
+local SabotageEvent = Remotes:WaitForChild("SabotageEvent") :: RemoteEvent
+local AdminCommand = Remotes:WaitForChild("AdminCommand") :: RemoteEvent
 
 --------------------------------------------------------------------------------
 -- Server-internal phase bus
@@ -74,8 +74,11 @@ local function ensureBindable(name: string): BindableEvent
 end
 
 local PhaseChangedBus = ensureBindable("PhaseChanged")
-local CorruptionBus   = ensureBindable("CorruptionTriggered")
-local StartMatchBus   = ensureBindable("StartMatch")
+local CorruptionBus = ensureBindable("CorruptionTriggered")
+local StartMatchBus = ensureBindable("StartMatch")
+-- Server-side twin of the SabotageEvent remote. A server script can't receive its
+-- own FireClient, so PowerManager listens here to drive the light flicker.
+local SabotageBus = ensureBindable("SabotageTriggered")
 
 -- Replicated mirror of the phase so QuestManager (and any client) can read it.
 local CurrentPhaseValue: IntValue
@@ -104,7 +107,7 @@ end
 export type PlayerData = {
 	health: number,
 	maxHealth: number,
-	projectCompletion: number,  -- 0‑100 %
+	projectCompletion: number, -- 0‑100 %
 	inventory: { string },
 	isAlive: boolean,
 	isHiding: boolean,
@@ -115,9 +118,9 @@ export type MatchState = {
 	matchId: string,
 	players: { Player },
 	currentPhase: number,
-	phaseStartTime: number,   -- os.clock() when phase began
-	phaseTimer: number,        -- seconds remaining in phase
-	gameTime: number,          -- in‑game clock hour (0‑24)
+	phaseStartTime: number, -- os.clock() when phase began
+	phaseTimer: number, -- seconds remaining in phase
+	gameTime: number, -- in‑game clock hour (0‑24)
 	corruptionTriggered: boolean,
 	ngmiSpawnTimer: number,
 	sabotageTimer: number,
@@ -133,6 +136,9 @@ local playerDataMap: { [Player]: PlayerData } = {}
 
 -- Unique match IDs
 local matchCounter = 0
+
+-- Defined under "Ending evaluation"; transitionTo calls it on DAY3.
+local evaluateEndings: (MatchState) -> ()
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -174,7 +180,7 @@ local function computeGameClock(phase: number, elapsed: number): number
 	local t = math.clamp(elapsed / duration, 0, 1) -- normalised progress
 
 	local startH = clockInfo.Start
-	local endH   = clockInfo.End
+	local endH = clockInfo.End
 
 	-- Handle wrap‑around for night (e.g. 20→6 means 20→30 in linear space)
 	if endH < startH then
@@ -205,9 +211,9 @@ end
 --- Fired once per second from the Heartbeat loop.
 local function broadcastTimerSync(match: MatchState)
 	local data = {
-		currentPhase   = match.currentPhase,
-		timeRemaining  = math.max(0, math.floor(match.phaseTimer)),
-		gameClockTime  = match.gameTime,
+		currentPhase = match.currentPhase,
+		timeRemaining = math.max(0, math.floor(match.phaseTimer)),
+		gameClockTime = match.gameTime,
 	}
 	for _, player in match.players do
 		PhaseTimerSync:FireClient(player, data)
@@ -259,7 +265,9 @@ end
 --- Apply damage to a player. If health reaches 0, trigger death sequence.
 function GameStateManager.damagePlayer(player: Player, amount: number)
 	local data = playerDataMap[player]
-	if not data or not data.isAlive then return end
+	if not data or not data.isAlive then
+		return
+	end
 
 	data.health = math.max(0, data.health - amount)
 	PlayerDamaged:FireClient(player, { health = data.health, maxHealth = data.maxHealth })
@@ -272,7 +280,9 @@ end
 --- Kill a player — fire PlayerDied, then schedule respawn after delay.
 function GameStateManager.killPlayer(player: Player)
 	local data = playerDataMap[player]
-	if not data then return end
+	if not data then
+		return
+	end
 
 	data.isAlive = false
 	data.health = 0
@@ -281,9 +291,13 @@ function GameStateManager.killPlayer(player: Player)
 	-- Respawn after a short delay
 	task.delay(GameConfig.RESPAWN_DELAY, function()
 		-- Ensure player is still in the game
-		if not player.Parent then return end
+		if not player.Parent then
+			return
+		end
 		local d = playerDataMap[player]
-		if not d then return end
+		if not d then
+			return
+		end
 
 		d.isAlive = true
 		d.health = GameConfig.Player.maxHealth
@@ -309,7 +323,9 @@ end
 --- Heal a player by a given amount
 function GameStateManager.healPlayer(player: Player, amount: number)
 	local data = playerDataMap[player]
-	if not data or not data.isAlive then return end
+	if not data or not data.isAlive then
+		return
+	end
 	data.health = math.min(data.maxHealth, data.health + amount)
 	PlayerDamaged:FireClient(player, { health = data.health, maxHealth = data.maxHealth })
 end
@@ -317,7 +333,9 @@ end
 --- Add project completion progress
 function GameStateManager.addProjectProgress(player: Player, amount: number)
 	local data = playerDataMap[player]
-	if not data then return end
+	if not data then
+		return
+	end
 	data.projectCompletion = math.clamp(data.projectCompletion + amount, 0, 100)
 end
 
@@ -351,13 +369,10 @@ local function transitionTo(match: MatchState, newPhase: number)
 	-- Phase‑specific entry actions
 	if newPhase == GameConfig.Phase.DAY1 then
 		print("[GameState] DAY1 started — exploration phase (" .. (GameConfig.PhaseDuration[newPhase] or 0) .. "s)")
-
 	elseif newPhase == GameConfig.Phase.DAY2 then
 		print("[GameState] DAY2 started — coding phase (" .. (GameConfig.PhaseDuration[newPhase] or 0) .. "s)")
-
 	elseif newPhase == GameConfig.Phase.NIGHT2 then
 		print("[GameState] NIGHT2 started — survival horror (" .. (GameConfig.PhaseDuration[newPhase] or 0) .. "s)")
-
 	elseif newPhase == GameConfig.Phase.DAY3 then
 		print("[GameState] DAY3 started — evaluating endings")
 		evaluateEndings(match) -- forward‑declared; defined below
@@ -396,6 +411,11 @@ local function triggerSabotage(match: MatchState)
 	local sabotageType = GameConfig.SABOTAGE_TYPES[math.random(#GameConfig.SABOTAGE_TYPES)]
 	print("[GameState] Sabotage event:", sabotageType)
 	fireToAll(SabotageEvent, match, { sabotageType = sabotageType })
+	-- Only power sabotages brown out the lights (a WiFi drop leaves them alone).
+	-- nil floor = venue-wide brown-out (this sabotage isn't scoped to a level).
+	if sabotageType == "PowerOutage" or sabotageType == "ServerCrash" then
+		SabotageBus:Fire(nil, 6)
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -404,14 +424,18 @@ end
 
 --- Evaluate each player's outcome and fire the EndingTrigger remote.
 --- Called upon entering DAY3.
-function evaluateEndings(match: MatchState)
+evaluateEndings = function(match: MatchState)
 	match.ended = true
 
 	for _, player in match.players do
-		if not player.Parent then continue end -- player left
+		if not player.Parent then
+			continue
+		end -- player left
 
 		local data = playerDataMap[player]
-		if not data then continue end
+		if not data then
+			continue
+		end
 
 		local endingType: string
 
@@ -429,8 +453,17 @@ function evaluateEndings(match: MatchState)
 			BadgeManager.award(player, GameConfig.BADGES.becameNGMI)
 		end
 
-		print("[GameState] Player", player.Name, "→", endingType,
-			"(completion:", data.projectCompletion, "%, alive:", data.isAlive, ")")
+		print(
+			"[GameState] Player",
+			player.Name,
+			"→",
+			endingType,
+			"(completion:",
+			data.projectCompletion,
+			"%, alive:",
+			data.isAlive,
+			")"
+		)
 
 		EndingTrigger:FireClient(player, {
 			ending = endingType,
@@ -460,7 +493,7 @@ end
 -- camera is on the off-map cutscene set and the real venue is hidden — the
 -- venue is already dark (Night2_Horror lighting) by the time the eyes open.
 --------------------------------------------------------------------------------
-local NIGHT_TRANSITION_HOLD = 28 -- seconds; lands while the venue is still hidden
+local NIGHT_TRANSITION_HOLD = 38 -- seconds; lands mid turn-montage, while the venue is still hidden
 
 local function triggerNightTransitionCutscene(match: MatchState)
 	fireToAll(CutsceneTrigger, match, { cutscene = "nightTransition" })
@@ -501,10 +534,14 @@ local SYNC_INTERVAL = 1 -- broadcast timer sync every 1 second
 
 local function onHeartbeat(dt: number)
 	local match = activeMatch
-	if not match or match.ended then return end
+	if not match or match.ended then
+		return
+	end
 
 	local phase = match.currentPhase
-	if phase == GameConfig.Phase.LOBBY then return end -- lobby doesn't tick
+	if phase == GameConfig.Phase.LOBBY then
+		return
+	end -- lobby doesn't tick
 
 	local elapsed = os.clock() - match.phaseStartTime
 	local duration = GameConfig.PhaseDuration[phase] or 0
@@ -527,7 +564,6 @@ local function onHeartbeat(dt: number)
 			fireToAll(CorruptionStarted, match)
 			CorruptionBus:Fire()
 		end
-
 	elseif phase == GameConfig.Phase.NIGHT2 then
 		-- NGMI spawning
 		match.ngmiSpawnTimer -= dt
@@ -688,9 +724,13 @@ if ServerRole.isMatchServer then
 	local MATCH_START_GRACE = 3 -- seconds to let the whole party teleport in
 
 	local function tryStartReservedMatch()
-		if activeMatch then return end
+		if activeMatch then
+			return
+		end
 		local present = Players:GetPlayers()
-		if #present == 0 then return end
+		if #present == 0 then
+			return
+		end
 		GameStateManager.startMatch(present)
 	end
 
@@ -707,7 +747,9 @@ end
 -- Payload is the array of players that filled the queue.
 --------------------------------------------------------------------------------
 StartMatchBus.Event:Connect(function(players: { Player })
-	if typeof(players) ~= "table" then return end
+	if typeof(players) ~= "table" then
+		return
+	end
 	GameStateManager.startMatch(players)
 end)
 
@@ -738,9 +780,13 @@ end)
 
 --- True if `phase` is a real phase in the state machine.
 local function isValidPhase(phase: any): boolean
-	if type(phase) ~= "number" then return false end
+	if type(phase) ~= "number" then
+		return false
+	end
 	for _, p in GameConfig.PHASE_ORDER do
-		if p == phase then return true end
+		if p == phase then
+			return true
+		end
 	end
 	return false
 end
@@ -760,7 +806,9 @@ local function adminSetPhase(targetPhase: number)
 		GameStateManager.startMatch(Players:GetPlayers()) -- lands on DAY1
 	end
 	local match = activeMatch
-	if not match then return end
+	if not match then
+		return
+	end
 
 	match.ended = false
 
@@ -781,12 +829,18 @@ local function adminSetPhase(targetPhase: number)
 	end
 end
 
+-- Phases are server-driven; clients only send `{ requestLobby = true }` from
+-- end screens, which has no server handling yet. Drain it so it can't queue.
+GameStateChanged.OnServerEvent:Connect(function() end)
+
 AdminCommand.OnServerEvent:Connect(function(player: Player, payload: any)
 	if not DebugConfig.isAdmin(player) then
 		warn("[GameState] Rejected admin command from non-admin", player.Name)
 		return
 	end
-	if typeof(payload) ~= "table" then return end
+	if typeof(payload) ~= "table" then
+		return
+	end
 
 	if payload.cmd == "setPhase" and isValidPhase(payload.phase) then
 		print("[GameState] Admin", player.Name, "→ setPhase", payload.phase)
