@@ -829,9 +829,28 @@ local function adminSetPhase(targetPhase: number)
 	end
 end
 
--- Phases are server-driven; clients only send `{ requestLobby = true }` from
--- end screens, which has no server handling yet. Drain it so it can't queue.
-GameStateChanged.OnServerEvent:Connect(function() end)
+-- A player went back to the lobby from an ending or death screen (LobbyReturn
+-- validated the request). Drop them from the match and show them the lobby;
+-- the last player out ends the match and resets every system to LOBBY.
+ensureBindable("PlayerLeftMatch").Event:Connect(function(player: Player)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") or not player.Parent then
+		return
+	end
+	playerDataMap[player] = nil
+	local match = activeMatch
+	if match then
+		local idx = table.find(match.players, player)
+		if idx then
+			table.remove(match.players, idx)
+		end
+		if #match.players == 0 then
+			GameStateManager.endMatch()
+			publishPhase(GameConfig.Phase.LOBBY)
+		end
+	end
+	GameStateChanged:FireClient(player, { phase = GameConfig.Phase.LOBBY })
+	player:LoadCharacter()
+end)
 
 AdminCommand.OnServerEvent:Connect(function(player: Player, payload: any)
 	if not DebugConfig.isAdmin(player) then
