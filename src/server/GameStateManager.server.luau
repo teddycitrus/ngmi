@@ -13,7 +13,6 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
-local ServerStorage = game:GetService("ServerStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local DebugConfig = require(ReplicatedStorage.Shared.DebugConfig)
@@ -28,9 +27,6 @@ local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 local PhaseTimerSync = Remotes:WaitForChild("PhaseTimerSync") :: RemoteEvent
 local CorruptionStarted = Remotes:WaitForChild("CorruptionStarted") :: RemoteEvent
-local PlayerDamaged = Remotes:WaitForChild("PlayerDamaged") :: RemoteEvent
-local PlayerDied = Remotes:WaitForChild("PlayerDied") :: RemoteEvent
-local PlayerRespawn = Remotes:WaitForChild("PlayerRespawn") :: RemoteEvent
 local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
 local EndingTrigger = Remotes:WaitForChild("EndingTrigger") :: RemoteEvent
 local SabotageEvent = Remotes:WaitForChild("SabotageEvent") :: RemoteEvent
@@ -49,29 +45,9 @@ local AdminCommand = Remotes:WaitForChild("AdminCommand") :: RemoteEvent
 --   • GameStateChanged:FireClient (RemoteEvent → clients)
 --------------------------------------------------------------------------------
 
-local function ensureFolder(parent: Instance, name: string): Folder
-	local found = parent:FindFirstChild(name)
-	if found and found:IsA("Folder") then
-		return found
-	end
-	local folder = Instance.new("Folder")
-	folder.Name = name
-	folder.Parent = parent
-	return folder
-end
-
-local serverComm = ensureFolder(ServerStorage, "ServerComm")
-
-local function ensureBindable(name: string): BindableEvent
-	local found = serverComm:FindFirstChild(name)
-	if found and found:IsA("BindableEvent") then
-		return found
-	end
-	local bindable = Instance.new("BindableEvent")
-	bindable.Name = name
-	bindable.Parent = serverComm
-	return bindable
-end
+local ServerComm = require(script.Parent:WaitForChild("ServerComm"))
+local serverComm = ServerComm.folder()
+local ensureBindable = ServerComm.bus
 
 local PhaseChangedBus = ensureBindable("PhaseChanged")
 local CorruptionBus = ensureBindable("CorruptionTriggered")
@@ -104,16 +80,6 @@ end
 --------------------------------------------------------------------------------
 -- Type definitions
 --------------------------------------------------------------------------------
-export type PlayerData = {
-	health: number,
-	maxHealth: number,
-	projectCompletion: number, -- 0‑100 %
-	inventory: { string },
-	isAlive: boolean,
-	isHiding: boolean,
-	currentQuests: { string },
-}
-
 export type MatchState = {
 	matchId: string,
 	players: { Player },
@@ -122,9 +88,7 @@ export type MatchState = {
 	phaseTimer: number, -- seconds remaining in phase
 	gameTime: number, -- in‑game clock hour (0‑24)
 	corruptionTriggered: boolean,
-	ngmiSpawnTimer: number,
 	sabotageTimer: number,
-	ngmiCount: number,
 	ended: boolean,
 }
 
@@ -132,7 +96,6 @@ export type MatchState = {
 -- Module‑level state
 --------------------------------------------------------------------------------
 local activeMatch: MatchState? = nil
-local playerDataMap: { [Player]: PlayerData } = {}
 
 -- Unique match IDs
 local matchCounter = 0
@@ -148,19 +111,6 @@ local evaluateEndings: (MatchState) -> ()
 local function generateMatchId(): string
 	matchCounter += 1
 	return "match_" .. tostring(matchCounter) .. "_" .. tostring(math.floor(os.clock()))
-end
-
---- Create default player data for a new player
-local function createPlayerData(): PlayerData
-	return {
-		health = GameConfig.Player.maxHealth,
-		maxHealth = GameConfig.Player.maxHealth,
-		projectCompletion = 0,
-		inventory = {},
-		isAlive = true,
-		isHiding = false,
-		currentQuests = {},
-	}
 end
 
 --- Compute the in‑game clock hour for the current phase & elapsed time.
@@ -237,107 +187,7 @@ local function fireToAll(remote: RemoteEvent, match: MatchState, ...: any)
 	end
 end
 
---------------------------------------------------------------------------------
--- Player data accessors (used by other server scripts via require)
---------------------------------------------------------------------------------
-
 local GameStateManager = {}
-
-function GameStateManager.getPlayerData(player: Player): PlayerData?
-	return playerDataMap[player]
-end
-
-function GameStateManager.getActiveMatch(): MatchState?
-	return activeMatch
-end
-
-function GameStateManager.getCurrentPhase(): number
-	if activeMatch then
-		return activeMatch.currentPhase
-	end
-	return GameConfig.Phase.LOBBY
-end
-
---------------------------------------------------------------------------------
--- Player damage / death / respawn
---------------------------------------------------------------------------------
-
---- Apply damage to a player. If health reaches 0, trigger death sequence.
-function GameStateManager.damagePlayer(player: Player, amount: number)
-	local data = playerDataMap[player]
-	if not data or not data.isAlive then
-		return
-	end
-
-	data.health = math.max(0, data.health - amount)
-	PlayerDamaged:FireClient(player, { health = data.health, maxHealth = data.maxHealth })
-
-	if data.health <= 0 then
-		GameStateManager.killPlayer(player)
-	end
-end
-
---- Kill a player — fire PlayerDied, then schedule respawn after delay.
-function GameStateManager.killPlayer(player: Player)
-	local data = playerDataMap[player]
-	if not data then
-		return
-	end
-
-	data.isAlive = false
-	data.health = 0
-	PlayerDied:FireClient(player)
-
-	-- Respawn after a short delay
-	task.delay(GameConfig.RESPAWN_DELAY, function()
-		-- Ensure player is still in the game
-		if not player.Parent then
-			return
-		end
-		local d = playerDataMap[player]
-		if not d then
-			return
-		end
-
-		d.isAlive = true
-		d.health = GameConfig.Player.maxHealth
-		PlayerRespawn:FireClient(player)
-
-		-- Move character to a NIGHT2 spawn point if available
-		local character = player.Character
-		if character then
-			local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if root then
-				-- Pick a random NGMI spawn for players during Night2 — keeps them
-				-- inside the map rather than the lobby.
-				local spawns = CollectionService:GetTagged(GameConfig.TAGS.PLAYER_DESK)
-				if #spawns > 0 then
-					local target = spawns[math.random(#spawns)]
-					root.CFrame = (target :: BasePart).CFrame + Vector3.new(0, 5, 0)
-				end
-			end
-		end
-	end)
-end
-
---- Heal a player by a given amount
-function GameStateManager.healPlayer(player: Player, amount: number)
-	local data = playerDataMap[player]
-	if not data or not data.isAlive then
-		return
-	end
-	data.health = math.min(data.maxHealth, data.health + amount)
-	PlayerDamaged:FireClient(player, { health = data.health, maxHealth = data.maxHealth })
-end
-
---- Add project completion progress
-function GameStateManager.addProjectProgress(player: Player, amount: number)
-	local data = playerDataMap[player]
-	if not data then
-		return
-	end
-	data.projectCompletion = math.clamp(data.projectCompletion + amount, 0, 100)
-end
 
 --------------------------------------------------------------------------------
 -- Phase transition logic
@@ -356,9 +206,7 @@ local function transitionTo(match: MatchState, newPhase: number)
 	if newPhase == GameConfig.Phase.DAY2 then
 		match.corruptionTriggered = false
 	elseif newPhase == GameConfig.Phase.NIGHT2 then
-		match.ngmiSpawnTimer = GameConfig.NGMISpawn.spawnInterval
 		match.sabotageTimer = GameConfig.Sabotage.intervalMin
-		match.ngmiCount = 0
 	end
 
 	-- Broadcast the change to clients…
@@ -382,29 +230,6 @@ end
 --------------------------------------------------------------------------------
 -- NIGHT2 sub‑systems: NGMI spawning & sabotage
 --------------------------------------------------------------------------------
-
---- Attempt to spawn an NGMI enemy at a random NGMISpawn tag.
-local function trySpawnNGMI(match: MatchState)
-	if match.ngmiCount >= GameConfig.NGMISpawn.maxCount then
-		return
-	end
-
-	local spawns = CollectionService:GetTagged(GameConfig.TAGS.NGMI_SPAWN)
-	if #spawns == 0 then
-		warn("[GameState] No NGMISpawn tags found — cannot spawn NGMI")
-		return
-	end
-
-	local spawnPart = spawns[math.random(#spawns)] :: BasePart
-	match.ngmiCount += 1
-
-	-- Actual NGMI creation is handled by a dedicated NGMIManager module.
-	-- Here we fire a server‑side signal that the NGMI system listens to.
-	-- For now, we log and can be extended later.
-	print("[GameState] Spawning NGMI #" .. match.ngmiCount .. " at", spawnPart.Position)
-
-	-- TODO: require(ServerScriptService.Server.NGMIManager).spawnAt(spawnPart.CFrame)
-end
 
 --- Fire a random sabotage event to all players
 local function triggerSabotage(match: MatchState)
@@ -432,10 +257,15 @@ evaluateEndings = function(match: MatchState)
 			continue
 		end -- player left
 
-		local data = playerDataMap[player]
-		if not data then
-			continue
-		end
+		-- Completion is CodingGameServer's (locked when the coding phases end);
+		-- alive is the character right now. The old PlayerData fields were
+		-- never written, so every survivor used to get the bad ending.
+		local completion = (player:GetAttribute("FinalProjectCompletion") :: number?)
+			or (player:GetAttribute("ProjectCompletion") :: number?)
+			or 0
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local alive = humanoid ~= nil and humanoid.Health > 0
 
 		local endingType: string
 
@@ -443,9 +273,9 @@ evaluateEndings = function(match: MatchState)
 		-- got the matching death badge) — don't replay an ending cutscene on top.
 		-- Of the survivors: shipping 100% is the true ending; anyone who lived but
 		-- shipped nothing has "become an NGMI" (the bad ending).
-		if not data.isAlive then
+		if not alive then
 			continue
-		elseif data.projectCompletion >= GameConfig.COMPLETION_THRESHOLD then
+		elseif completion >= GameConfig.COMPLETION_THRESHOLD then
 			endingType = "true"
 			BadgeManager.award(player, GameConfig.BADGES.trueEnding)
 		else
@@ -459,15 +289,13 @@ evaluateEndings = function(match: MatchState)
 			"→",
 			endingType,
 			"(completion:",
-			data.projectCompletion,
-			"%, alive:",
-			data.isAlive,
-			")"
+			completion,
+			"%)"
 		)
 
 		EndingTrigger:FireClient(player, {
 			ending = endingType,
-			projectCompletion = data.projectCompletion,
+			projectCompletion = completion,
 		})
 	end
 end
@@ -565,13 +393,6 @@ local function onHeartbeat(dt: number)
 			CorruptionBus:Fire()
 		end
 	elseif phase == GameConfig.Phase.NIGHT2 then
-		-- NGMI spawning
-		match.ngmiSpawnTimer -= dt
-		if match.ngmiSpawnTimer <= 0 then
-			match.ngmiSpawnTimer = GameConfig.NGMISpawn.spawnInterval
-			trySpawnNGMI(match)
-		end
-
 		-- Sabotage events
 		match.sabotageTimer -= dt
 		if match.sabotageTimer <= 0 then
@@ -654,11 +475,6 @@ function GameStateManager.startMatch(players: { Player })
 		return
 	end
 
-	-- Create per‑player data
-	for _, player in players do
-		playerDataMap[player] = createPlayerData()
-	end
-
 	local match: MatchState = {
 		matchId = generateMatchId(),
 		players = players,
@@ -667,9 +483,7 @@ function GameStateManager.startMatch(players: { Player })
 		phaseTimer = 0,
 		gameTime = 18, -- 6 PM lobby
 		corruptionTriggered = false,
-		ngmiSpawnTimer = GameConfig.NGMISpawn.spawnInterval,
 		sabotageTimer = GameConfig.Sabotage.intervalMin,
-		ngmiCount = 0,
 		ended = false,
 	}
 
@@ -681,6 +495,20 @@ function GameStateManager.startMatch(players: { Player })
 
 	-- Immediately transition to DAY1
 	transitionTo(match, GameConfig.Phase.DAY1)
+end
+
+--- Drop a player from the active match roster. Returns true when that left
+--- the roster empty.
+local function removeFromMatch(player: Player): boolean
+	local match = activeMatch
+	if not match then
+		return false
+	end
+	local idx = table.find(match.players, player)
+	if idx then
+		table.remove(match.players, idx)
+	end
+	return #match.players == 0
 end
 
 --- Clean up after a match ends or a player leaves
@@ -697,19 +525,8 @@ end
 --------------------------------------------------------------------------------
 
 Players.PlayerRemoving:Connect(function(player)
-	-- Clean up player data
-	playerDataMap[player] = nil
-
-	-- Remove from active match roster
-	if activeMatch then
-		local idx = table.find(activeMatch.players, player)
-		if idx then
-			table.remove(activeMatch.players, idx)
-		end
-		-- If no players left, end the match
-		if #activeMatch.players == 0 then
-			GameStateManager.endMatch()
-		end
+	if removeFromMatch(player) then
+		GameStateManager.endMatch()
 	end
 end)
 
@@ -829,27 +646,42 @@ local function adminSetPhase(targetPhase: number)
 	end
 end
 
--- A player went back to the lobby from an ending or death screen (LobbyReturn
--- validated the request). Drop them from the match and show them the lobby;
--- the last player out ends the match and resets every system to LOBBY.
-ensureBindable("PlayerLeftMatch").Event:Connect(function(player: Player)
-	if typeof(player) ~= "Instance" or not player:IsA("Player") or not player.Parent then
+-- Return to Lobby (LobbyReturn validated the sender: in DAY3, or dead). On a
+-- same-server match every player shares one phase and one world, so a single
+-- player can't leave on their own: the request ends the match for everyone
+-- once it is over (DAY3) or once nobody in it is left alive. Otherwise it is
+-- refused and the dead player respawns as usual.
+local function anyoneElseAlive(match: MatchState, except: Player): boolean
+	for _, p in match.players do
+		local humanoid = p ~= except and p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+ensureBindable("RequestLobby").Event:Connect(function(player: Player)
+	local match = activeMatch
+	if not (match and typeof(player) == "Instance" and table.find(match.players, player)) then
 		return
 	end
-	playerDataMap[player] = nil
-	local match = activeMatch
-	if match then
-		local idx = table.find(match.players, player)
-		if idx then
-			table.remove(match.players, idx)
-		end
-		if #match.players == 0 then
-			GameStateManager.endMatch()
-			publishPhase(GameConfig.Phase.LOBBY)
+	if match.currentPhase ~= GameConfig.Phase.DAY3 and anyoneElseAlive(match, player) then
+		return
+	end
+	local roster = table.clone(match.players)
+	print("[GameState]", player.Name, "ended match", match.matchId, "back to the lobby")
+	GameStateManager.endMatch()
+	-- Every subsystem resets on LOBBY (SurvivalManager's pending respawns
+	-- included: they check isActive), and CurrentPhase replicates 0.
+	publishPhase(GameConfig.Phase.LOBBY)
+	for _, p in roster do
+		if p.Parent then
+			GameStateChanged:FireClient(p, { phase = GameConfig.Phase.LOBBY })
+			-- Same SpawnLocations a player joins on (Venue/Builder), lobby UI on top.
+			p:LoadCharacter()
 		end
 	end
-	GameStateChanged:FireClient(player, { phase = GameConfig.Phase.LOBBY })
-	player:LoadCharacter()
 end)
 
 AdminCommand.OnServerEvent:Connect(function(player: Player, payload: any)

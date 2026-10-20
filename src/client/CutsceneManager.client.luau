@@ -335,9 +335,9 @@ end
 -- ENDING SCREEN TEARDOWN
 -- ============================================================
 -- Both endings free the cursor for their "Return to Lobby" button, so every way
--- off the screen has to release it, not just that button: the server does not
--- act on requestLobby yet (HANDOFF G7), and a phase change (a new match, an
--- admin skip) is the other exit. A leaked push pins the camera in third person
+-- off the screen has to release it, not just that button: the button's
+-- requestLobby (server/LobbyReturn) and any phase change (a new match, the
+-- lobby, an admin skip) are the exits. A leaked push pins the camera in third person
 -- for the rest of the session.
 local closeEnding: (() -> ())? = nil
 
