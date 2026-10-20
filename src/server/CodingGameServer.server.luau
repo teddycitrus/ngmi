@@ -38,7 +38,6 @@ export type PlayerCodingState = {
 	completion: number,       -- 0-100 float
 	lastTaskTick: number,     -- os.clock() of last accepted task (cooldown)
 	taskCount: number,        -- total tasks completed (for mini-game rotation)
-	blocked: boolean,         -- true when power is sabotaged in player's zone
 	finalCompletion: number?, -- locked at phase transition for ending eval
 }
 
@@ -88,7 +87,6 @@ local function initPlayerState(player: Player): ()
 		completion = 0,
 		lastTaskTick = 0,
 		taskCount = 0,
-		blocked = false,
 		finalCompletion = nil,
 	}
 end
@@ -254,13 +252,13 @@ local function stopNightTerminals()
 end
 
 --[[
-	Sends current coding progress to a specific client.
-	Includes blocked state so the UI can show sabotage effects.
+	Sends current coding progress to a specific client. Night 2's power gate
+	sends its own blocked = true (see onCodingTaskComplete).
 ]]
 local function sendProgressUpdate(player: Player, state: PlayerCodingState): ()
 	CodingProgressRemote:FireClient(player, {
 		completion = state.completion,
-		blocked = state.blocked,
+		blocked = false,
 		taskCount = state.taskCount,
 	})
 end
@@ -278,7 +276,7 @@ end
 	  3. Cooldown must have elapsed since last task
 	  4. Task type must be valid
 	  5. Score must be in valid range
-	  6. Power must not be sabotaged (blocked)
+	  6. Night 2: every panel and server must be back online
 ]]
 local function onCodingTaskComplete(player: Player, payload: any): ()
 	-- Phase gate: only accept during DAY2 or NIGHT2
@@ -337,17 +335,6 @@ local function onCodingTaskComplete(player: Player, payload: any): ()
 		return
 	end
 
-	-- Sabotage check: power is out → block progress
-	if state.blocked then
-		-- Notify client that coding is blocked
-		CodingProgressRemote:FireClient(player, {
-			completion = state.completion,
-			blocked = true,
-			taskCount = state.taskCount,
-		})
-		return
-	end
-
 	if currentPhase == GameConfig.Phase.DAY2 then
 		-- Day 2: building the project — two flat tasks take you to 100%.
 		state.completion = math.min(100, state.completion + DAY2_TASK_GAIN)
@@ -389,7 +376,7 @@ end
 
 --[[
 	On phase change, lock in final completion percentages for ending
-	evaluation. Reset blocked state for new phases.
+	evaluation.
 ]]
 local function onGameStateChanged(_player: Player?, phaseData: any): ()
 	if typeof(phaseData) ~= "table" then
@@ -444,11 +431,6 @@ local function onGameStateChanged(_player: Player?, phaseData: any): ()
 				)
 			)
 		end
-	end
-
-	-- Reset blocked state on any phase change
-	for _, state in playerStates do
-		state.blocked = false
 	end
 end
 
