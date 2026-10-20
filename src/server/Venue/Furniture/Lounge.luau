@@ -218,14 +218,14 @@ end
 --------------------------------------------------------------------------------
 -- SleepingBag
 -- Runs along Z: pillow at -Z, feet at +Z. AmbientPopulation lays a sleeper
--- along it, so the pad and cover keep their old sizes.
+-- along it; the quilt is tall enough to hide the sleeper's legs.
 --------------------------------------------------------------------------------
 local function sleepingBag(): Model
 	local m = Kit.model("SleepingBag")
 	local c = ({ COLORS.SLEEPING_BAG_1, COLORS.SLEEPING_BAG_2, COLORS.SLEEPING_BAG_3 })[math.random(3)]
 	Kit.part(m, "Pad", V(3, 0.5, 6.4), CF(0, 0.3, 0.2), c, M.Fabric)
 	Kit.cyl(m, "PadEnd", 3, 0.5, CF(0, 0.3, -3.0), c, M.Fabric, { collide = false })
-	Kit.blob(m, "Cover", V(3.1, 0.9, 4.6), CF(0, 0.75, 1.1), c:Lerp(Color3.new(), 0.28), M.Fabric, { collide = false })
+	Kit.blob(m, "Cover", V(3.2, 1.4, 4.9), CF(0, 0.85, 1.15), c:Lerp(Color3.new(), 0.28), M.Fabric, { collide = false })
 	Kit.trim(m, "Zip", V(0.06, 0.06, 6), CF(1.48, 0.55, 0.2), Color3.fromRGB(200, 200, 205), M.Metal)
 	Kit.blob(m, "Pillow", V(2.4, 0.7, 1.3), CF(0, 0.85, -2.8), Color3.fromRGB(228, 226, 232), M.Fabric, { collide = false })
 	return m

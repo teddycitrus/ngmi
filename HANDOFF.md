@@ -208,7 +208,7 @@ broken) to P3 (polish/cleanup). Add items freely; keep each to one or two lines.
 | G3 | P1 | QA | Elevator ride untested since the venue rebuild. Prompts can now be pressed via `user_keyboard_input` (section 3.6), so test: call, ride all 3 floors, doors, blackout refusal. | `server/ElevatorController`, `server/Venue/Elevators` | OPEN |
 | G4 | P1 | QA | Night 2 full pass on the new venue: blackout look, emergency lights, flashlight on new materials, panels and racks reachable, NGMI chase through doors and stairs, blood decals on room floors. | many | OPEN |
 | V1 | P2 | Visual | Night transition cutscene builds its own plain-part room at (8000, 400, 8000); rebuild it from the Venue furniture templates so it matches the game. | `client/CutsceneManager` | OPEN |
-| V2 | P2 | Visual | Verify couch and sleeping-bag sleeper poses (moved to RigPose this session, never eyeballed). | `server/AmbientPopulation` | OPEN |
+| V2 | P2 | Visual | Verify couch and sleeping-bag sleeper poses (moved to RigPose this session, never eyeballed). Bag sleepers fixed: their legs lay on top of the quilt; the body is lower and the quilt taller (screenshot). Couch sleepers still to eyeball. | `server/AmbientPopulation`, `server/Venue/Furniture/Lounge` | IN PROGRESS |
 | V3 | P2 | Visual | Stairwell Brick material reads oversized; consider a MaterialVariant or a smaller-scale material for painted block. | `server/Venue/Stairs`, `server/Venue/Elevators` | OPEN |
 | A1 | P2 | Audio | Footsteps by floor material (carpet, tile, concrete, wood), door and elevator sounds, per-room ambience (server hum in supply, HVAC). The `[AudioManager] 0 sounds` print is just `#` on a dictionary. | `client/AudioManager` | OPEN |
 | F1 | P2 | Perf | Mobile/low-end pass: 30k parts, ~300 lights, ~530 SurfaceGuis, StreamingEnabled off by design. Measure, then trim trim-parts or add distance culling for hall decor. | `server/Venue/*` | OPEN |
@@ -219,6 +219,12 @@ broken) to P3 (polish/cleanup). Add items freely; keep each to one or two lines.
 | D2 | P3 | Design | Coding minigame UX review (CodingGameUI is the core loop and hasn't been touched in the recent passes). | `client/CodingGameUI`, `server/CodingGameServer` | OPEN |
 
 ## 6. Work log (newest first)
+
+### 2026-10-19: sleeping-bag sleepers tucked in (V2, part)
+- **What:** a screenshot showed bag sleepers lying on top of the quilt with their legs exposed. Lowered the body (pivot 1.0 to 0.75 above the bag) and made the quilt taller and slightly larger (Cover 3.1x0.9x4.6 at y 0.75 to 3.2x1.4x4.9 at y 0.85). The quilt is a non-colliding sphere mesh, so no new coplanar faces.
+- **Verified (Play):** before/after screenshots; the quilt now covers the legs. selene 0 warnings.
+- **Next:** couch sleepers (V2), then F1.
+
 
 ### 2026-10-19: dead coding block state removed (C4)
 - **What:** CodingGameServer's per-player `blocked` flag lost its only setters in S2; removed the field, its check and its reset. The Night 2 power gate (`NightSystemsRestored`) still sends `blocked = true` on its own. 523 to 505 lines.

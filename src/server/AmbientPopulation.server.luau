@@ -292,7 +292,7 @@ local function spawnSleepingBag(spot: Part)
 	-- Lay the rig flat along the bag, head toward the pillow end (-Z of the bag).
 	local model = RigFactory.create()
 	RigFactory.applyHair(model, math.random(0, 999999))
-	model:PivotTo(bagCF * CFrame.new(0, 1.0, -1.4) * CFrame.Angles(math.rad(-90), 0, 0))
+	model:PivotTo(bagCF * CFrame.new(0, 0.75, -1.4) * CFrame.Angles(math.rad(-90), 0, 0))
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.Anchored = true
