@@ -566,9 +566,17 @@ end
 --------------------------------------------------------------------------------
 
 -- HeartbeatMinigame reports how its rhythm game ended. Hiding is decided here,
--- by the prompt, never by the client, so the report is drained and ignored
--- (a listener keeps it from piling up in the remote's queue).
-HidingStateChanged.OnServerEvent:Connect(function() end)
+-- by the prompt, never by the client: the only report acted on is
+-- "discovered", which pulls the sender OUT of their spot (it can only ever
+-- cost them their own cover). "Safe" leaves them hidden.
+HidingStateChanged.OnServerEvent:Connect(function(player: Player, data: any)
+	if typeof(data) == "table" and data.discovered == true then
+		local spot = hidingPlayers[player]
+		if spot then
+			handleHidingSpot(player, spot)
+		end
+	end
+end)
 
 Players.PlayerRemoving:Connect(function(player: Player)
 	hidingPlayers[player] = nil

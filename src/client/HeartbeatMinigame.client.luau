@@ -72,7 +72,9 @@ local function getNearestNGMIDistance(): number
             local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
             if ngmiRoot and ngmiRoot:IsA("BasePart") then
                 local dist = (ngmiRoot.Position - playerPos).Magnitude
-                if dist < nearest then nearest = dist end
+                if dist < nearest then
+                    nearest = dist
+                end
             end
         end
     end
@@ -103,7 +105,9 @@ end
 -- UI CREATION
 -- ============================================================
 local function createMinigameUI()
-    if minigameGui then minigameGui:Destroy() end
+    if minigameGui then
+        minigameGui:Destroy()
+    end
 
     minigameGui = Instance.new("ScreenGui")
     minigameGui.Name = "HeartbeatMinigame"
@@ -319,7 +323,9 @@ function registerMiss()
         }):Play()
 
         task.delay(0.3, function()
-            if flash.Parent then flash:Destroy() end
+            if flash.Parent then
+                flash:Destroy()
+            end
         end)
     end
 
@@ -460,15 +466,29 @@ end)
 -- ============================================================
 -- EVENT LISTENERS
 -- ============================================================
-HidingStateChanged.OnClientEvent:Connect(function(data: { hiding: boolean, ngmiNearby: boolean? })
-    if data.hiding and (data.ngmiNearby == nil or data.ngmiNearby) then
-        isHiding = true
-        local dist = getNearestNGMIDistance()
-        if dist <= SAFE_DISTANCE then
+-- InteractionManager sends { isHiding, spotName } to the hider and broadcasts
+-- { playerId, isHiding } to everyone; only this player's own state counts.
+HidingStateChanged.OnClientEvent:Connect(function(data: any)
+    if typeof(data) ~= "table" then
+        return
+    end
+    if data.playerId ~= nil and data.playerId ~= player.UserId then
+        return
+    end
+    isHiding = data.isHiding == true
+    if not isHiding then
+        stopMinigame()
+    end
+end)
+
+-- While hidden on Night 2, an NGMI coming within SAFE_DISTANCE starts the
+-- rhythm game (it used to be checked only at the moment of hiding).
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if isHiding and isNight2 and not isActive and getNearestNGMIDistance() <= SAFE_DISTANCE then
             startMinigame()
         end
-    elseif not data.hiding then
-        stopMinigame()
     end
 end)
 
