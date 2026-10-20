@@ -1032,8 +1032,8 @@ local function startAttack(ngmi: NGMIData, dist: number)
 	ngmi.model:SetAttribute("AttackSeq", ngmi.attackSeq)
 end
 
-local function landHit(ngmi: NGMIData, target: Player, targetHumanoid: Humanoid)
-	PlayerDamaged:FireClient(target, BASE_DAMAGE, ngmi.model)
+local function landHit(_ngmi: NGMIData, target: Player, targetHumanoid: Humanoid)
+	PlayerDamaged:FireClient(target, { damage = BASE_DAMAGE, source = "NGMI" })
 	-- Tag the cause so the death screen shows the right message, then apply
 	-- damage to their Humanoid directly (server-authoritative).
 	target:SetAttribute("DeathCause", "ngmi")

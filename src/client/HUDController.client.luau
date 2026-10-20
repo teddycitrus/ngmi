@@ -247,8 +247,7 @@ PhaseTimerSync.OnClientEvent:Connect(function(data: { phase: number, timeRemaini
     end
 end)
 
--- Senders disagree on the payload (HANDOFF G9): a table from GameStateManager
--- and QuestManager, bare numbers from NGMIController. The flash needs neither.
+-- Payload from every sender: { damage: number?, health: number?, source: string? }.
 PlayerDamaged.OnClientEvent:Connect(function(data: any)
     if typeof(data) == "table" then
         if data.health then

@@ -125,7 +125,7 @@ local function applyDamage(player: Player, amount: number, sourceId: string?): (
 	state.health = math.max(0, state.health - amount)
 
 	-- Notify the damaged client of their current health
-	PlayerDamaged:FireClient(player, state.health, amount, sourceId or "unknown")
+	PlayerDamaged:FireClient(player, { health = state.health, damage = amount, source = sourceId or "unknown" })
 
 	if state.health <= 0 then
 		state.isDead = true
