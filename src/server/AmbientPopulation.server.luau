@@ -6,8 +6,8 @@
 -- crashed out asleep on lounge couches and in sleeping bags on the floor.
 --
 -- These are NOT the dialogue NPCs (those live in NPCManager). They are anchored,
--- AI-less avatar rigs created by RigFactory. Total count is capped for
--- performance. They clear out when Night 2 begins (the labs empty as the
+-- AI-less avatar rigs created by RigFactory. About 85% of seats are
+-- filled (Ambient/Seats covers the non-desk seating). They clear out when Night 2 begins (the labs empty as the
 -- outbreak starts).
 --
 -- Postures go through Shared.RigPose. These rigs have no Motor6Ds (each joint
@@ -24,12 +24,13 @@ local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local RigPose = require(ReplicatedStorage.Shared.RigPose)
 local RigFactory = require(script.Parent.RigFactory)
 local AssetLibrary = require(script.Parent.AssetLibrary)
+local Seats = require(script.Parent:WaitForChild("Ambient"):WaitForChild("Seats"))
 
 local PHASE_NIGHT2 = GameConfig.Phase.NIGHT2
 
--- Performance cap: real rigs are far heavier than the old block models, so we
--- limit how many we place. Lower these if the server struggles.
-local MAX_SEATED = 80
+-- Share of desk seats with a typist; the rest stay free. Lounge seating,
+-- stools, benches, beanbags and meeting chairs are filled by Ambient/Seats.
+local DESK_FILL = 0.85
 local MAX_LEANERS = 10
 local MAX_COUCH_SLEEPERS = 4
 local MAX_BAG_SLEEPERS = 4
@@ -43,6 +44,8 @@ folder.Parent = workspace
 local spawned: { Model } = {}
 local processed: { [Instance]: boolean } = {}
 local seatedCount = 0
+local maxSeated = 0
+local disabledSeats: { Seat } = {}
 local leanerCount = 0
 local couchSleeperCount = 0
 local bagSleeperCount = 0
@@ -86,7 +89,7 @@ end
 --------------------------------------------------------------------------------
 
 local function spawnSeated(seat: Part)
-	if seatedCount >= MAX_SEATED then
+	if seatedCount >= maxSeated then
 		return
 	end
 	seatedCount += 1
@@ -192,44 +195,6 @@ local function nearestWall(origin: Vector3): (Vector3?, Vector3?)
 	return best, bestDir
 end
 
---- A phone in the right hand, screen toward the face, welded so it follows
---- the idle sway.
-local function givePhone(model: Model)
-	local hand = model:FindFirstChild("RightHand")
-	local head = model:FindFirstChild("Head")
-	if not (hand and hand:IsA("BasePart") and head and head:IsA("BasePart")) then
-		return
-	end
-	local phone = Instance.new("Part")
-	phone.Name = "Phone"
-	phone.Size = V(0.5, 0.9, 0.08)
-	phone.Color = Color3.fromRGB(24, 24, 28)
-	phone.Material = Enum.Material.SmoothPlastic
-	phone.CanCollide = false
-	phone.CanTouch = false
-	phone.CanQuery = false
-	phone.Massless = true
-	local at = hand.Position + (head.Position - hand.Position).Unit * 0.35
-	phone.CFrame = CFrame.lookAt(at, head.Position) * CFrame.Angles(math.rad(-20), 0, 0)
-	local screen = Instance.new("Part")
-	screen.Name = "PhoneScreen"
-	screen.Size = V(0.42, 0.8, 0.02)
-	screen.Color = Color3.fromRGB(120, 190, 255)
-	screen.Material = Enum.Material.Neon
-	screen.CanCollide = false
-	screen.CanTouch = false
-	screen.CanQuery = false
-	screen.Massless = true
-	screen.CFrame = phone.CFrame * CFrame.new(0, 0, -0.05)
-	for _, p in { phone, screen } do
-		local w = Instance.new("WeldConstraint")
-		w.Part0 = hand
-		w.Part1 = p
-		w.Parent = p
-		p.Parent = model
-	end
-end
-
 local function spawnLeaning(spot: Part)
 	if leanerCount >= MAX_LEANERS or string.find(spot.Name, "Stair") then
 		return -- standing on a staircase reads wrong
@@ -262,7 +227,7 @@ local function spawnLeaning(spot: Part)
 	local which = math.random(#LEAN_POSES)
 	pose(model, LEAN_POSES[which])
 	if which == 1 then
-		task.defer(givePhone, model)
+		task.defer(Seats.givePhone, model)
 	end
 	RigFactory.enableHeadTracking(model, hum)
 	table.insert(spawned, model)
@@ -354,6 +319,7 @@ local function populate()
 		local j = math.random(i)
 		seats[i], seats[j] = seats[j], seats[i]
 	end
+	maxSeated = math.floor(#seats * DESK_FILL + 0.5)
 	for _, s in seats do
 		if not processed[s] then
 			processed[s] = true
@@ -386,10 +352,17 @@ local function populate()
 		end
 	end
 
+	local sitters, used = Seats.populate(folder, processed)
+	for _, m in sitters do
+		table.insert(spawned, m)
+	end
+	disabledSeats = used
+
 	print(
 		string.format(
-			"[AmbientPopulation] Placed %d seated + %d leaning + %d couch-sleepers + %d bag-sleepers",
+			"[AmbientPopulation] Placed %d at desks + %d in other seats + %d leaning + %d couch-sleepers + %d bag-sleepers",
 			seatedCount,
+			#sitters,
 			leanerCount,
 			couchSleeperCount,
 			bagSleeperCount
@@ -404,17 +377,36 @@ local function clearAll()
 		end
 	end
 	table.clear(spawned)
-	print("[AmbientPopulation] Cleared ambient hackers (Night 2)")
+	for _, seat in disabledSeats do
+		seat.Disabled = false
+	end
+	table.clear(disabledSeats)
+	table.clear(processed)
+	seatedCount, leanerCount, couchSleeperCount, bagSleeperCount = 0, 0, 0, 0
+	print("[AmbientPopulation] Cleared ambient hackers")
 end
 
-task.delay(2, populate)
+-- Populated once the venue exists, cleared for Night 2, and back for the next
+-- match (LOBBY or DAY1) if the night emptied the building.
+local populated = false
+local function ensurePopulated()
+	if not populated then
+		populated = true
+		populate()
+	end
+end
+
+task.delay(2, ensurePopulated)
 
 task.spawn(function()
 	local serverComm = ServerStorage:WaitForChild("ServerComm")
 	local phaseBus = serverComm:WaitForChild("PhaseChanged") :: BindableEvent
 	phaseBus.Event:Connect(function(phase: number)
 		if phase == PHASE_NIGHT2 then
+			populated = false
 			clearAll()
+		elseif phase == GameConfig.Phase.LOBBY or phase == GameConfig.Phase.DAY1 then
+			ensurePopulated()
 		end
 	end)
 end)
