@@ -26,6 +26,8 @@ local TeleportService = game:GetService("TeleportService")
 -- and GameStateManager takes over.
 local ServerRole = require(script.Parent:WaitForChild("ServerRole"))
 if ServerRole.isMatchServer then
+	-- Replicates to clients so LobbyUI never builds the mode menu here.
+	game:GetService("ReplicatedStorage"):SetAttribute("IsMatchServer", true)
 	print("[LobbyManager] Reserved match server — matchmaking disabled.")
 	return
 end

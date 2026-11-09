@@ -26,6 +26,7 @@ local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("U
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -761,6 +762,61 @@ end)
 -- Initialize
 --------------------------------------------------------------------------------
 
+-- The mode was already picked if we arrived on a reserved match server (the
+-- lobby teleports the party here with a matchId) or a match is already running.
+-- Don't rely on the GameStateChanged remote alone for this: it can fire before
+-- this script connects, and a queued remote event only reaches the first
+-- script that listens.
+local function isMatchInProgress(): boolean
+	if ReplicatedStorage:GetAttribute("IsMatchServer") == true then
+		return true
+	end
+	local ok, data = pcall(function()
+		return TeleportService:GetLocalPlayerTeleportData()
+	end)
+	if ok and typeof(data) == "table" and (data :: any).matchId ~= nil then
+		return true
+	end
+	local phaseValue = ReplicatedStorage:FindFirstChild("CurrentPhase")
+	return phaseValue ~= nil and phaseValue:IsA("IntValue") and phaseValue.Value ~= 0
+end
+
+-- LocalScripts can start before the initial snapshot lands, so the
+-- IsMatchServer attribute and CurrentPhase may not be visible yet.
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
+if isMatchInProgress() then
+	print("[LobbyUI] Match server, skipping mode menu")
+	return
+end
+
 buildLobbyGui()
+
+-- Late safety net: if the match-server flag shows up after the menu was
+-- built, take it down instead of leaving a dead menu over the match.
+ReplicatedStorage:GetAttributeChangedSignal("IsMatchServer"):Connect(function()
+	if ReplicatedStorage:GetAttribute("IsMatchServer") == true then
+		hideLobby()
+	end
+end)
+
+-- CurrentPhase is replicated state, so unlike the remote it can't be missed.
+task.spawn(function()
+	local phaseValue = ReplicatedStorage:WaitForChild("CurrentPhase", 30)
+	if not (phaseValue and phaseValue:IsA("IntValue")) then
+		return
+	end
+	if phaseValue.Value ~= 0 then
+		hideLobby()
+	end
+	phaseValue.Changed:Connect(function(value: number)
+		if value ~= 0 then
+			hideLobby()
+		end
+	end)
+end)
+
 
 print("[LobbyUI] Lobby interface loaded ✓")
