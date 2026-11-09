@@ -217,8 +217,16 @@ broken) to P3 (polish/cleanup). Add items freely; keep each to one or two lines.
 | C3 | P3 | Code health | Dead code: NPCConfig hand-authored waypoints and hiding spots for the old map (NPCManager ignores them). (`CorruptionStarted` IS used: GameStateManager fires it at the Day 2 halfway mark.) | `shared/NPCConfig` | OPEN |
 | D1 | P3 | Design | Give the new spaces gameplay: Hack Hall and Library hiding spots, lounge/library items, use of the locked front entrance in an ending. | `server/Venue/Rooms/*` | OPEN |
 | D2 | P3 | Design | Coding minigame UX review (CodingGameUI is the core loop and hasn't been touched in the recent passes). | `client/CodingGameUI`, `server/CodingGameServer` | OPEN |
+| G12 | P1 | QA | Multiplayer pass on a published place with 2-4 accounts: open-party list and privacy, join code across two lobby servers, invite, ready / kick / make leader, fill matchmaking merging 2+1+1, teleport, rejoin after a disconnect, regroup on return, and in the match: panels, racks, coding % and quests moving for everyone. | `server/Lobby/*`, `server/LobbyManager`, `server/LobbyReturn`, `client/Lobby/*` | OPEN |
 
 ## 6. Work log (newest first)
+
+### 2026-11-09: parties, bigger lobby menu, shared co-op state
+- **Lobby menu** rebuilt on a 1600x900 stage scaled to the screen (about 1.2x at 1080p). TextSize and TextScaled both stop at 100: the title and the countdown number are scaled with UIScale. The countdown is a full-screen dim with a 300-px number.
+- **Parties** (`server/Lobby/{Parties,Matchmaker,Launcher,Arrivals,Presence,Net}`, `client/Lobby/{PartyPanel,Browser,Overlay}`): always-in-a-party model, leader-set mode, public / friends / private, ready checks, kick, make leader, join codes, invites (LaunchData), open-party list, fill matchmaking (exact sums, oldest first), countdown cancel on any leave, teleport retry and a 45 s release, rejoin (MemoryStore ticket and match heartbeat), regroup after a match. QueueManager removed. In a published game a failed teleport no longer starts the match on the lobby server.
+- **Shared co-op state:** Day 2 project is one team project (2 tasks per teammate to 100%), side quests are team-wide with rewards and the boss badge for everyone, "find your desk" waits for every teammate at their own desk, the panel puzzle closes when a teammate fixes that panel, desks keep their owner when someone joins mid-match.
+- **Verified in Play** (one client): menu, search, Start now, countdown, local match start, return to LOBBY rebuilds the menu, no errors. Edit-mode test of Parties and Matchmaker with fake players: 13/13.
+- **Not verified:** anything needing two clients or a published place (open-party list, kick, invites, cross-server codes, teleport, rejoin, regroup). Board G12.
 
 ### 2026-10-19: sleeping-bag sleepers tucked in (V2, part)
 - **What:** a screenshot showed bag sleepers lying on top of the quilt with their legs exposed. Lowered the body (pivot 1.0 to 0.75 above the bag) and made the quilt taller and slightly larger (Cover 3.1x0.9x4.6 at y 0.75 to 3.2x1.4x4.9 at y 0.85). The quilt is a non-colliding sphere mesh, so no new coplanar faces.

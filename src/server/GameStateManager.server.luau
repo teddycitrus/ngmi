@@ -432,7 +432,7 @@ RunService.Heartbeat:Connect(onHeartbeat)
 --- Assign each player their own PlayerDesk and publish it so the client can
 --- draw a personal "your desk" beacon. Desks are tagged by MapBuilder (which
 --- runs asynchronously), so we poll briefly until they exist. Each player gets
---- the desk at their roster index; the assignment is mirrored onto both the
+--- a free desk (keeping any desk they already hold); the assignment is mirrored onto both the
 --- player (AssignedDeskId attribute → replicates to that client) and the desk
 --- (OwnerUserId attribute).
 local function assignDesks(players: { Player })
@@ -456,11 +456,45 @@ local function assignDesks(players: { Player })
 		return ida < idb
 	end)
 
-	for i, player in players do
-		local desk = desks[((i - 1) % #desks) + 1]
-		local deskId = (desk:GetAttribute("DeskId") :: string?) or desk.Name
-		player:SetAttribute("AssignedDeskId", deskId)
-		desk:SetAttribute("OwnerUserId", player.UserId)
+	local function idOf(desk: Instance): string
+		return (desk:GetAttribute("DeskId") :: string?) or desk.Name
+	end
+
+	-- Re-run when someone joins mid-match: players who already have a desk
+	-- keep it, newcomers get a free one. Owners who left lose theirs.
+	local taken: { [Instance]: Player } = {}
+	local pending: { Player } = {}
+	for _, player in players do
+		local current = player:GetAttribute("AssignedDeskId")
+		local kept = false
+		for _, desk in desks do
+			if idOf(desk) == current and not taken[desk] then
+				taken[desk] = player
+				kept = true
+				break
+			end
+		end
+		if not kept then
+			table.insert(pending, player)
+		end
+	end
+	for _, player in pending do
+		local desk: Instance? = nil
+		for _, d in desks do
+			if not taken[d] then
+				desk = d
+				break
+			end
+		end
+		-- More players than desks: share, round robin.
+		local index = table.find(players, player) or 1
+		local chosen = desk or desks[(index - 1) % #desks + 1]
+		taken[chosen] = taken[chosen] or player
+		player:SetAttribute("AssignedDeskId", idOf(chosen))
+	end
+	for _, desk in desks do
+		local owner = taken[desk]
+		desk:SetAttribute("OwnerUserId", if owner then owner.UserId else nil)
 	end
 end
 

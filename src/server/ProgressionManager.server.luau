@@ -13,7 +13,7 @@
 -- check-offs are pushed to the client objectives panel via the QuestUpdate remote.
 --
 -- Objectives
---   DAY1 (required): find your desk · meet 2 staff
+--   DAY1 (required): every teammate finds their own desk · meet 2 staff
 --   DAY2 (required): coding sprint I (50%) · sprint II (100%) · scavenge 3 supplies
 --                    · explore all 3 floors
 --   DAY2 (bonus):    defeat the Bathroom Monster · fix a frozen PC
@@ -78,6 +78,7 @@ local floorsVisited: { [number]: boolean } = {}
 local floorsCount = 0
 local sawMonster = false
 local frozenPC: Model? = nil
+local deskFound: { [Player]: boolean } = {}
 local lastFired: { [string]: string } = {}
 
 -- Activity tracking so we don't advance the day mid-conversation / mid-task.
@@ -107,7 +108,17 @@ end
 --- The live label for an objective (with its current progress baked in).
 local function objText(id: string): string
 	if id == "find_desk" then
-		return "Find your desk"
+		local total = #Players:GetPlayers()
+		if total <= 1 then
+			return "Find your desk"
+		end
+		local found = 0
+		for _, plr in Players:GetPlayers() do
+			if deskFound[plr] then
+				found += 1
+			end
+		end
+		return string.format("Everyone find your desk (%d/%d)", found, total)
 	elseif id == "talk_npcs" then
 		return string.format("Meet the staff (%d/%d)", math.min(talkedCount, TALK_TARGET), TALK_TARGET)
 	elseif id == "code_wave1" then
@@ -228,26 +239,40 @@ end
 --------------------------------------------------------------------------------
 -- Detectors
 --------------------------------------------------------------------------------
-local function anyPlayerNearDesk(): boolean
+--- Mark each player who is standing at their own desk (any desk if they
+--- have no assignment yet). True once every player in the match has.
+local function everyoneFoundDesk(): boolean
 	local desks = CollectionService:GetTagged(GameConfig.TAGS.PLAYER_DESK)
+	local all = true
 	for _, plr in Players:GetPlayers() do
-		local char = plr.Character
-		local hrp = char and char:FindFirstChild("HumanoidRootPart")
-		if hrp and hrp:IsA("BasePart") then
-			for _, d in desks do
-				local pos: Vector3? = nil
-				if d:IsA("BasePart") then
-					pos = d.Position
-				elseif d:IsA("Model") and d.PrimaryPart then
-					pos = d.PrimaryPart.Position
+		if not deskFound[plr] then
+			local char = plr.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local mine = plr:GetAttribute("AssignedDeskId")
+			if hrp and hrp:IsA("BasePart") then
+				for _, d in desks do
+					local id = d:GetAttribute("DeskId") or d.Name
+					if mine == nil or id == mine then
+						local pos: Vector3? = nil
+						if d:IsA("BasePart") then
+							pos = d.Position
+						elseif d:IsA("Model") and d.PrimaryPart then
+							pos = d.PrimaryPart.Position
+						end
+						if pos and (pos - hrp.Position).Magnitude <= DESK_RADIUS then
+							deskFound[plr] = true
+							fireObjective("find_desk", false)
+							break
+						end
+					end
 				end
-				if pos and (pos - hrp.Position).Magnitude <= DESK_RADIUS then
-					return true
-				end
+			end
+			if not deskFound[plr] then
+				all = false
 			end
 		end
 	end
-	return false
+	return all and #Players:GetPlayers() > 0
 end
 
 --- Floor index (0,1,2) from a world Y (floors are 18 studs apart).
@@ -267,7 +292,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 
 	if phase == DAY1 then
-		if not done.find_desk and anyPlayerNearDesk() then
+		if not done.find_desk and everyoneFoundDesk() then
 			markDone("find_desk")
 		end
 	elseif phase == DAY2 then
@@ -470,6 +495,7 @@ local function resetState()
 		frozenPC:Destroy()
 		frozenPC = nil
 	end
+	table.clear(deskFound)
 end
 
 phaseBus.Event:Connect(function(p: number)
@@ -499,6 +525,11 @@ task.spawn(function()
 			refresh()
 		end
 	end
+end)
+
+-- Someone leaving can't hold the desk objective hostage.
+Players.PlayerRemoving:Connect(function(plr: Player)
+	deskFound[plr] = nil
 end)
 
 print("[ProgressionManager] Ready — DAY1/DAY2 are quest-gated.")

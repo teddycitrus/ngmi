@@ -5,7 +5,9 @@
 	Server-side coding progress tracker for "Not Gonna Make It".
 
 	Responsibilities:
-	  • Tracks per-player project completion (0-100%)
+	  • Tracks the team's shared project completion (0-100%): everyone in the
+	    match builds one project, any member's task moves it for all, and
+	    every member's client sees the same number
 	  • Validates CodingTaskComplete claims from clients (anti-cheat)
 	  • Applies score-based progress for three mini-game types
 	  • Blocks progress when power is sabotaged
@@ -53,9 +55,10 @@ local TASK_COOLDOWN: number = 3.0          -- seconds between accepted tasks (an
 local DESK_PROXIMITY: number = 20          -- studs — max distance from desk to submit
 local DESK_TAG: string = GameConfig.TAGS.PLAYER_DESK
 
--- Day 2 builds the project: each completed task is a flat chunk, so exactly two
--- tasks take you from 0 → 100%.
-local DAY2_TASK_GAIN: number = 50
+-- Day 2 builds the project: two tasks per teammate take the shared project
+-- from 0 to 100% (a solo player needs 2, a team of four needs 8 between them).
+local DAY2_TASKS_PER_PLAYER: number = 2
+local MAX_TEAM: number = 4
 
 -- Night 2 is a "recompile" scramble: finish this many tasks, each at a random
 -- highlighted terminal that moves after every one.
@@ -74,6 +77,13 @@ local VALID_TASK_TYPES: { [string]: boolean } = {
 ----------------------------------------------------------------------
 local playerStates: { [number]: PlayerCodingState } = {}  -- keyed by UserId
 local currentPhase: number = GameConfig.Phase.LOBBY
+-- The team's one project (PlayerCodingState.completion mirrors it per player).
+local teamCompletion: number = 0
+local teamFinal: number? = nil
+
+local function teamSize(): number
+	return math.clamp(#Players:GetPlayers(), 1, MAX_TEAM)
+end
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -84,10 +94,10 @@ local currentPhase: number = GameConfig.Phase.LOBBY
 ]]
 local function initPlayerState(player: Player): ()
 	playerStates[player.UserId] = {
-		completion = 0,
+		completion = teamCompletion,
 		lastTaskTick = 0,
 		taskCount = 0,
-		finalCompletion = nil,
+		finalCompletion = teamFinal,
 	}
 end
 
@@ -263,6 +273,18 @@ local function sendProgressUpdate(player: Player, state: PlayerCodingState): ()
 	})
 end
 
+--- Set the shared project and tell every teammate.
+local function setTeamCompletion(value: number): ()
+	teamCompletion = math.clamp(value, 0, 100)
+	for _, plr in Players:GetPlayers() do
+		local st = playerStates[plr.UserId]
+		if st then
+			st.completion = teamCompletion
+			sendProgressUpdate(plr, st)
+		end
+	end
+end
+
 ----------------------------------------------------------------------
 -- Task Completion Handler
 ----------------------------------------------------------------------
@@ -336,12 +358,11 @@ local function onCodingTaskComplete(player: Player, payload: any): ()
 	end
 
 	if currentPhase == GameConfig.Phase.DAY2 then
-		-- Day 2: building the project — two flat tasks take you to 100%.
-		state.completion = math.min(100, state.completion + DAY2_TASK_GAIN)
+		-- Day 2: building the shared project.
 		state.lastTaskTick = now
 		state.taskCount += 1
-		print(string.format("[CodingGameServer] %s built the project → %.0f%%", player.Name, state.completion))
-		sendProgressUpdate(player, state)
+		setTeamCompletion(teamCompletion + 100 / (DAY2_TASKS_PER_PLAYER * teamSize()))
+		print(string.format("[CodingGameServer] %s built the project → %.0f%%", player.Name, teamCompletion))
 
 	elseif currentPhase == GameConfig.Phase.NIGHT2 then
 		-- Night 2: the recompile scramble. Only the currently HIGHLIGHTED terminal
@@ -420,17 +441,21 @@ local function onGameStateChanged(_player: Player?, phaseData: any): ()
 		and newPhase ~= GameConfig.Phase.DAY2
 		and newPhase ~= GameConfig.Phase.NIGHT2
 	then
-		print("[CodingGameServer] Phase ended — locking final completion percentages.")
-		for userId, state in playerStates do
-			state.finalCompletion = state.completion
-			print(
-				string.format(
-					"  Player %d → %.1f%%",
-					userId,
-					state.completion
-				)
-			)
+		teamFinal = teamCompletion
+		print(string.format("[CodingGameServer] Phase ended, team project locked at %.1f%%", teamCompletion))
+		for _, state in playerStates do
+			state.finalCompletion = teamFinal
 		end
+	end
+
+	-- A new match starts the project from scratch.
+	if newPhase == GameConfig.Phase.LOBBY or newPhase == GameConfig.Phase.DAY1 then
+		teamFinal = nil
+		for _, state in playerStates do
+			state.finalCompletion = nil
+			state.taskCount = 0
+		end
+		setTeamCompletion(0)
 	end
 end
 
@@ -449,9 +474,7 @@ local function setPlayerCompletionAttribute(player: Player): ()
 	local state = playerStates[player.UserId]
 	if state then
 		player:SetAttribute("ProjectCompletion", state.completion)
-		if state.finalCompletion then
-			player:SetAttribute("FinalProjectCompletion", state.finalCompletion)
-		end
+		player:SetAttribute("FinalProjectCompletion", state.finalCompletion)
 	end
 end
 

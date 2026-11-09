@@ -1,21 +1,22 @@
 --!strict
 --[[
 	LobbyManager.server.luau
-	Server Script — Lobby orchestration and matchmaking
-	
-	Responsibilities:
-	  1. Place newly-joined players in the LOBBY phase
-	  2. Route queue join/leave requests through QueueManager
-	  3. When a queue fills, create a match → countdown → start game
-	  4. Track active matches (matchId → match data)
-	  5. Handle disconnects mid-queue and mid-countdown
-	  6. Broadcast queue counts to all lobby players so the UI stays current
+	Parties and matchmaking on the lobby server.
+
+	Every player in the lobby is in a party (see Lobby/Parties). This script:
+	  1. Handles menu actions from LobbyUI (PlayerJoinedLobby remote): mode,
+	     privacy, fill, ready, start, cancel, join by list or code, leave,
+	     kick, promote, rejoin.
+	  2. Runs matchmaking for searching parties and hands full groups to
+	     Lobby/Launcher (countdown, then teleport to a reserved match server).
+	  3. Brings players into the right party when they arrive (Lobby/Arrivals):
+	     from an invite, a join code typed on another lobby server, or home
+	     from a match with their team.
+	  4. Pushes each player their menu state whenever something changes.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService")
-local ServerStorage = game:GetService("ServerStorage")
 local TeleportService = game:GetService("TeleportService")
 
 --------------------------------------------------------------------------------
@@ -27,489 +28,443 @@ local TeleportService = game:GetService("TeleportService")
 local ServerRole = require(script.Parent:WaitForChild("ServerRole"))
 if ServerRole.isMatchServer then
 	-- Replicates to clients so LobbyUI never builds the mode menu here.
-	game:GetService("ReplicatedStorage"):SetAttribute("IsMatchServer", true)
-	print("[LobbyManager] Reserved match server — matchmaking disabled.")
+	ReplicatedStorage:SetAttribute("IsMatchServer", true)
+	print("[LobbyManager] Reserved match server, matchmaking disabled.")
 	return
 end
 
---------------------------------------------------------------------------------
--- Remote Events
---------------------------------------------------------------------------------
+local GameConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("GameConfig"))
+local ServerComm = require(script.Parent:WaitForChild("ServerComm"))
+local LobbyFolder = script.Parent:WaitForChild("Lobby")
+local Parties = require(LobbyFolder:WaitForChild("Parties"))
+local Matchmaker = require(LobbyFolder:WaitForChild("Matchmaker"))
+local Launcher = require(LobbyFolder:WaitForChild("Launcher"))
+local Presence = require(LobbyFolder:WaitForChild("Presence"))
+local Net = require(LobbyFolder:WaitForChild("Net"))
+local Arrivals = require(LobbyFolder:WaitForChild("Arrivals"))
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local PlayerJoinedLobbyRemote = Remotes:WaitForChild("PlayerJoinedLobby") :: RemoteEvent
-local QueueUpdateRemote       = Remotes:WaitForChild("QueueUpdate") :: RemoteEvent
-local MatchFoundRemote        = Remotes:WaitForChild("MatchFound") :: RemoteEvent
-local StartGameRemote         = Remotes:WaitForChild("StartGame") :: RemoteEvent
-local GameStateChangedRemote  = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
+type Party = Parties.Party
 
---------------------------------------------------------------------------------
--- Dependencies
---------------------------------------------------------------------------------
-
-local QueueManager = require(script.Parent:WaitForChild("QueueManager"))
-
---------------------------------------------------------------------------------
--- Types
---------------------------------------------------------------------------------
-
-type MatchData = {
-	matchId: string,
-	players: { Player },
-	phase: string,       -- "LOBBY" | "COUNTDOWN" | "PLAYING" | "ENDED"
-	startTime: number,
-	queueSize: number,
-}
+local ACTION_COOLDOWN = 0.2
+local CODE_LOOKUP_COOLDOWN = 2
+local FLUSH_INTERVAL = 0.15
+local RESYNC_INTERVAL = 3
+local MATCHMAKE_INTERVAL = 0.5
+local PRESENCE_REFRESH = 20 * 60
+local MAX_OPEN_LISTED = 12
 
 --------------------------------------------------------------------------------
--- Constants
+-- Friends (who can see and join a friends-only party)
 --------------------------------------------------------------------------------
 
-local COUNTDOWN_SECONDS: number = 5
-local QUEUE_BROADCAST_INTERVAL: number = 1.0 -- Seconds between queue count broadcasts
+local friendCache: { [string]: boolean } = {}
 
--- Spawn points for matched players (offsets from arena center).
--- In production these would reference actual SpawnLocation parts in the workspace.
--- Drop matched players just inside the main hall entrance (the map is built
--- around world origin by MapBuilder; the old -200 value was out in the void).
-local ARENA_CENTER = Vector3.new(0, 8, -40)
-local SPAWN_OFFSETS: { Vector3 } = {
-	Vector3.new(-10, 0, 0),
-	Vector3.new(10, 0, 0),
-	Vector3.new(0, 0, -10),
-	Vector3.new(0, 0, 10),
-}
-
---------------------------------------------------------------------------------
--- State
---------------------------------------------------------------------------------
-
--- All active matches indexed by their unique ID
-local activeMatches: { [string]: MatchData } = {}
-
--- Reverse lookup: playerId → matchId (so we can find a player's match quickly)
-local playerMatchMap: { [number]: string } = {}
-
--- Set of players currently in the lobby (not in a match yet)
-local lobbyPlayers: { [number]: boolean } = {}
-
--- Players currently in a countdown (can still disconnect and cancel)
-local countdownPlayers: { [number]: boolean } = {}
-
---------------------------------------------------------------------------------
--- Helpers
---------------------------------------------------------------------------------
-
---[[
-	Generates a short unique match ID using HttpService.
-]]
-local function generateMatchId(): string
-	-- Use first 8 chars of a GUID for readability
-	local guid = HttpService:GenerateGUID(false)
-	return "MATCH-" .. string.sub(guid, 1, 8)
+local function pairKey(a: number, b: number): string
+	return math.min(a, b) .. ":" .. math.max(a, b)
 end
 
---[[
-	Teleports a player's character to the given world position.
-	Safely handles missing character / HumanoidRootPart.
-]]
-local function teleportCharacter(player: Player, position: Vector3): ()
-	local character = player.Character
-	if not character then
+local function isFriend(a: Player, b: Player): boolean
+	return friendCache[pairKey(a.UserId, b.UserId)] == true
+end
+
+local function checkFriend(a: Player, b: Player)
+	local key = pairKey(a.UserId, b.UserId)
+	if friendCache[key] ~= nil then
 		return
 	end
-	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if root then
-		root.CFrame = CFrame.new(position)
+	local ok, result = pcall(function()
+		return a:IsFriendsWith(b.UserId)
+	end)
+	friendCache[key] = ok and result == true
+	if friendCache[key] then
+		Parties.dirty = true
 	end
 end
 
---[[
-	Broadcasts the latest queue counts to every player in the lobby.
-]]
-local function broadcastQueueCounts(): ()
-	local counts = QueueManager.getQueueCounts()
-	for userId, _ in lobbyPlayers do
-		local player = Players:GetPlayerByUserId(userId)
-		if player then
-			QueueUpdateRemote:FireClient(player, {
-				type = "counts",
-				counts = counts,
-			})
-		end
+local function canSee(viewer: Player, party: Party): boolean
+	if party.privacy == "public" then
+		return true
+	elseif party.privacy == "friends" then
+		return isFriend(viewer, party.leader)
 	end
-end
-
---[[
-	Notifies remaining queue members when someone leaves, so the UI
-	can update the player list / count in real time.
-]]
-local function notifyQueueChange(queueSize: number): ()
-	local queuePlayers = QueueManager.getQueuePlayers(queueSize)
-	local counts = QueueManager.getQueueCounts()
-
-	for _, player in queuePlayers do
-		QueueUpdateRemote:FireClient(player, {
-			type = "queueChanged",
-			queueSize = queueSize,
-			currentCount = counts[queueSize],
-		})
-	end
-
-	-- Also broadcast updated counts to all lobby players
-	broadcastQueueCounts()
+	return false
 end
 
 --------------------------------------------------------------------------------
--- Match Lifecycle
+-- Menu state
 --------------------------------------------------------------------------------
 
---[[
-	Fallback start: run the match on THIS server (used in Studio, or if the
-	teleport to a reserved server fails). Teleports characters to arena spawns,
-	tells clients the game is starting, and hands the roster to GameStateManager.
-]]
-local function startMatchLocally(matchData: MatchData, playerNames: { string }): ()
-	for i, player in matchData.players do
-		local offset = SPAWN_OFFSETS[((i - 1) % #SPAWN_OFFSETS) + 1]
-		teleportCharacter(player, ARENA_CENTER + offset)
-	end
+local rejoinable: { [Player]: Presence.Rejoin } = {}
 
-	for _, player in matchData.players do
-		StartGameRemote:FireClient(player, {
-			matchId = matchData.matchId,
-			players = playerNames,
-			queueSize = matchData.queueSize,
+local function currentPhase(): number
+	local value = ReplicatedStorage:FindFirstChild("CurrentPhase")
+	return if value and value:IsA("IntValue") then value.Value else GameConfig.Phase.LOBBY
+end
+
+local function partyView(party: Party)
+	local members = {}
+	for _, m in party.members do
+		table.insert(members, {
+			userId = m.UserId,
+			name = m.Name,
+			displayName = m.DisplayName,
+			leader = m == party.leader,
+			ready = m == party.leader or party.ready[m] == true,
 		})
 	end
-
-	local serverComm = ServerStorage:WaitForChild("ServerComm")
-	local startMatchBus = serverComm:WaitForChild("StartMatch") :: BindableEvent
-	startMatchBus:Fire(matchData.players)
-end
-
---[[
-	Preferred start: reserve a brand-new isolated server for this place and send
-	the whole party there together. Returns true if the teleport was dispatched.
-
-	ReserveServer + TeleportAsync(ReservedServerAccessCode) is the standard way to
-	create per-match dedicated servers without needing a second place — each call
-	yields a fresh server instance only this party can reach.
-]]
-local function teleportPartyToMatchServer(matchData: MatchData): boolean
-	local reserveOk, accessCode = pcall(function()
-		return TeleportService:ReserveServer(game.PlaceId)
-	end)
-	if not reserveOk or typeof(accessCode) ~= "string" then
-		warn("[LobbyManager] ReserveServer failed:", accessCode)
-		return false
-	end
-
-	local options = Instance.new("TeleportOptions")
-	options.ReservedServerAccessCode = accessCode
-	options:SetTeleportData({
-		matchId = matchData.matchId,
-		queueSize = matchData.queueSize,
-	})
-
-	local teleportOk, err = pcall(function()
-		TeleportService:TeleportAsync(game.PlaceId, matchData.players, options)
-	end)
-	if not teleportOk then
-		warn("[LobbyManager] TeleportAsync failed:", err)
-		return false
-	end
-
-	print("[LobbyManager] Teleporting", #matchData.players, "player(s) to a reserved match server.")
-	return true
-end
-
---[[
-	Creates a match from a set of matched players, runs the countdown,
-	then starts the game. The entire flow is:
-	  1. Register match in activeMatches
-	  2. Fire MatchFound to all participants
-	  3. 5-second countdown (with disconnect handling)
-	  4. Fire StartGame & teleport players
-	  5. Initialize GameStateManager for this match
-]]
-local function createMatch(matchedPlayers: { Player }, queueSize: number): ()
-	local matchId = generateMatchId()
-
-	-- Build match data
-	local matchData: MatchData = {
-		matchId = matchId,
-		players = matchedPlayers,
-		phase = "COUNTDOWN",
-		startTime = tick(),
-		queueSize = queueSize,
+	return {
+		id = party.id,
+		code = party.code,
+		leaderId = party.leader.UserId,
+		mode = party.mode,
+		privacy = party.privacy,
+		fill = party.fill,
+		status = party.status,
+		searchSeconds = if party.searchSince then math.floor(os.clock() - party.searchSince) else nil,
+		members = members,
 	}
-	activeMatches[matchId] = matchData
+end
 
-	-- Map players to this match and remove them from lobby pool
-	for _, player in matchedPlayers do
-		playerMatchMap[player.UserId] = matchId
-		lobbyPlayers[player.UserId] = nil
-		countdownPlayers[player.UserId] = true
-	end
-
-	-- Notify clients: match found!
-	local playerNames: { string } = {}
-	for _, player in matchedPlayers do
-		table.insert(playerNames, player.DisplayName)
-	end
-
-	for _, player in matchedPlayers do
-		MatchFoundRemote:FireClient(player, {
-			matchId = matchId,
-			players = playerNames,
-			countdownSeconds = COUNTDOWN_SECONDS,
-			queueSize = queueSize,
-		})
-	end
-
-	-- Broadcast updated queue counts since players left the queues
-	broadcastQueueCounts()
-
-	-- Countdown phase — check for disconnects each second
-	for i = COUNTDOWN_SECONDS, 1, -1 do
-		task.wait(1)
-
-		-- Verify all players are still connected
-		local allPresent = true
-		local remaining: { Player } = {}
-
-		for _, player in matchData.players do
-			if player.Parent ~= nil and countdownPlayers[player.UserId] then
-				table.insert(remaining, player)
-			else
-				-- Player disconnected during countdown
-				allPresent = false
-				countdownPlayers[player.UserId] = nil
-				playerMatchMap[player.UserId] = nil
-			end
-		end
-
-		if not allPresent then
-			-- Cancel match — put remaining players back in lobby
-			matchData.phase = "ENDED"
-			for _, player in remaining do
-				countdownPlayers[player.UserId] = nil
-				playerMatchMap[player.UserId] = nil
-				lobbyPlayers[player.UserId] = true
-
-				QueueUpdateRemote:FireClient(player, {
-					type = "matchCancelled",
-					reason = "A player disconnected during countdown",
-				})
-			end
-			activeMatches[matchId] = nil
-			broadcastQueueCounts()
-			return
-		end
-
-		-- Send countdown tick to clients
-		for _, player in matchData.players do
-			QueueUpdateRemote:FireClient(player, {
-				type = "countdown",
-				remaining = i - 1, -- seconds left after this tick
-				matchId = matchId,
+local function stateFor(player: Player)
+	local mine = Parties.of(player)
+	local open = {}
+	for _, party in Parties.all() do
+		if party ~= mine and Parties.isOpen(party) and #party.members < party.mode and canSee(player, party) then
+			table.insert(open, {
+				id = party.id,
+				leaderName = party.leader.DisplayName,
+				leaderId = party.leader.UserId,
+				mode = party.mode,
+				count = #party.members,
+				privacy = party.privacy,
+				searching = party.status == "searching",
 			})
 		end
 	end
-
-	-- ── Start Game ──────────────────────────────────────────────────────
-
-	matchData.phase = "PLAYING"
-	matchData.startTime = tick()
-
-	for _, player in matchData.players do
-		countdownPlayers[player.UserId] = nil
+	table.sort(open, function(a, b)
+		return a.count > b.count
+	end)
+	while #open > MAX_OPEN_LISTED do
+		table.remove(open)
 	end
+	return {
+		type = "state",
+		party = if mine then partyView(mine) else nil,
+		open = open,
+		searching = Matchmaker.counts(),
+		rejoin = rejoinable[player] ~= nil,
+		matchRunning = currentPhase() ~= GameConfig.Phase.LOBBY,
+		jobId = game.JobId,
+	}
+end
 
-	-- Preferred path: send the party to a brand-new reserved server that runs
-	-- only their match. Falls back to a same-server start in Studio or if the
-	-- teleport can't be performed (e.g. the place isn't published yet).
-	local teleported = false
-	if not ServerRole.isStudio then
-		teleported = teleportPartyToMatchServer(matchData)
-	end
-
-	if not teleported then
-		startMatchLocally(matchData, playerNames)
+local function flush()
+	Parties.dirty = false
+	for _, player in Players:GetPlayers() do
+		Net.send(player, stateFor(player))
 	end
 end
 
---------------------------------------------------------------------------------
--- Queue Processing
---------------------------------------------------------------------------------
-
---[[
-	After adding a player to a queue, check if the queue is now full.
-	If so, kick off match creation in a new thread.
-]]
-local function processQueue(queueSize: number): ()
-	local matched = QueueManager.checkQueue(queueSize)
-	if matched and #matched > 0 then
-		-- Spawn match creation on a separate thread so we don't block
-		task.spawn(createMatch, matched, queueSize)
-	end
-end
-
---------------------------------------------------------------------------------
--- Client → Server Event Handlers
---------------------------------------------------------------------------------
-
---[[
-	Player requests to join a queue.
-	Payload: { action = "join", queueSize = number }
-	         { action = "leave" }
-]]
-PlayerJoinedLobbyRemote.OnServerEvent:Connect(function(player: Player, payload: any)
-	if typeof(payload) ~= "table" then
-		return
-	end
-
-	local action = payload.action
-
-	if action == "join" then
-		local queueSize = payload.queueSize
-		if typeof(queueSize) ~= "number" then
-			return
-		end
-
-		-- Must be in the lobby to join a queue
-		if not lobbyPlayers[player.UserId] and not QueueManager.isPlayerQueued(player) then
-			-- They might have just joined — add them to lobby first
-			lobbyPlayers[player.UserId] = true
-		end
-
-		local success, state, message = QueueManager.addToQueue(player, queueSize)
-
-		-- Send personal feedback
-		QueueUpdateRemote:FireClient(player, {
-			type = "joinResult",
-			success = success,
-			message = message,
-			queueSize = if state then state.queueSize else nil,
-			currentCount = if state then state.currentCount else nil,
-		})
-
-		if success then
-			lobbyPlayers[player.UserId] = nil -- They're now "in queue", not plain lobby
-			notifyQueueChange(queueSize)
-			processQueue(queueSize)
-		end
-
-	elseif action == "leave" then
-		local success, queueSize, message = QueueManager.removeFromQueue(player)
-
-		QueueUpdateRemote:FireClient(player, {
-			type = "leaveResult",
-			success = success,
-			message = message,
-		})
-
-		if success then
-			lobbyPlayers[player.UserId] = true -- Back to lobby
-			notifyQueueChange(queueSize)
+task.spawn(function()
+	local sinceResync = 0
+	while true do
+		task.wait(FLUSH_INTERVAL)
+		sinceResync += FLUSH_INTERVAL
+		if Parties.dirty or sinceResync >= RESYNC_INTERVAL then
+			sinceResync = 0
+			flush()
 		end
 	end
 end)
 
 --------------------------------------------------------------------------------
--- Player Connection / Disconnection
+-- Matchmaking
 --------------------------------------------------------------------------------
 
---[[
-	When a player joins the game, place them into the lobby and send
-	initial state.
-]]
-local function onPlayerAdded(player: Player): ()
-	lobbyPlayers[player.UserId] = true
-
-	-- Send them the current queue counts so the UI can populate immediately
-	task.defer(function()
-		local counts = QueueManager.getQueueCounts()
-		QueueUpdateRemote:FireClient(player, {
-			type = "counts",
-			counts = counts,
-		})
-
-		-- Notify client that they're in the lobby (phase is numeric — the client
-		-- compares against GameConfig.Phase.* which are numbers).
-		GameStateChangedRemote:FireClient(player, {
-			phase = 0, -- GameConfig.Phase.LOBBY
-		})
-	end)
-end
-
---[[
-	When a player leaves, clean them out of queues, countdowns, and matches.
-]]
-local function onPlayerRemoving(player: Player): ()
-	local userId = player.UserId
-
-	-- Remove from queue (bypass cooldown)
-	local wasQueued, queueSize = QueueManager.forceRemovePlayer(player)
-	if wasQueued then
-		notifyQueueChange(queueSize)
+local function matchmake()
+	for _, party in Parties.all() do
+		-- A searching party that filled up on its own goes straight in.
+		if party.status == "searching" and #party.members >= party.mode then
+			task.spawn(Launcher.begin, { party })
+		end
 	end
-
-	-- Remove from lobby set
-	lobbyPlayers[userId] = nil
-	countdownPlayers[userId] = nil
-
-	-- If they were in an active match, clean up
-	local matchId = playerMatchMap[userId]
-	if matchId then
-		playerMatchMap[userId] = nil
-		local matchData = activeMatches[matchId]
-		if matchData then
-			-- Remove the disconnected player from the match's player list
-			for i, p in matchData.players do
-				if p.UserId == userId then
-					table.remove(matchData.players, i)
-					break
-				end
+	for _, mode in { 1, 2, 4 } do
+		while true do
+			local group = Matchmaker.form(mode)
+			if not group then
+				break
 			end
-			-- If no players left, remove the match entirely
-			if #matchData.players == 0 then
-				activeMatches[matchId] = nil
-			end
+			-- Launcher.begin locks the parties before its first yield, so the
+			-- next Matchmaker.form can't pick them again.
+			task.spawn(Launcher.begin, group)
 		end
 	end
 end
 
--- Hook up to existing players (in case script loads late) and future players
+task.spawn(function()
+	while true do
+		task.wait(MATCHMAKE_INTERVAL)
+		matchmake()
+	end
+end)
+
+local function checkRejoin(player: Player)
+	local info = Arrivals.findRejoin(player)
+	if info and player.Parent then
+		rejoinable[player] = info
+		Parties.dirty = true
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Menu actions
+--------------------------------------------------------------------------------
+
+local function targetOf(payload: any): Player?
+	local id = payload.userId
+	return if typeof(id) == "number" then Players:GetPlayerByUserId(id) else nil
+end
+
+local function leaderOnly(player: Player, party: Party): boolean
+	if party.leader ~= player then
+		Net.toast(player, "Only the party leader can do that", "warn")
+		return false
+	end
+	return true
+end
+
+local function report(player: Player, ok: boolean, err: string?)
+	if not ok and err then
+		Net.toast(player, err, "warn")
+	end
+end
+
+local handlers: { [string]: (Player, Party, any) -> () } = {}
+
+handlers.mode = function(player, party, payload)
+	if leaderOnly(player, party) and typeof(payload.mode) == "number" then
+		report(player, Parties.setMode(party, payload.mode))
+	end
+end
+
+handlers.privacy = function(player, party, payload)
+	if leaderOnly(player, party) and typeof(payload.privacy) == "string" then
+		Parties.setPrivacy(party, payload.privacy)
+	end
+end
+
+handlers.fill = function(player, party, payload)
+	if leaderOnly(player, party) and typeof(payload.fill) == "boolean" then
+		report(player, Parties.setFill(party, payload.fill))
+	end
+end
+
+handlers.ready = function(player, _party, payload)
+	if typeof(payload.ready) == "boolean" then
+		report(player, Parties.setReady(player, payload.ready))
+	end
+end
+
+handlers.start = function(player, party, _payload)
+	if not leaderOnly(player, party) or party.status ~= "idle" then
+		return
+	end
+	if not Parties.allReady(party) then
+		Net.toast(player, "Waiting for everyone to ready up", "warn")
+		return
+	end
+	if currentPhase() ~= GameConfig.Phase.LOBBY then
+		Net.toast(player, "A match is already running on this server", "warn")
+		return
+	end
+	if #party.members >= party.mode or not party.fill then
+		task.spawn(Launcher.begin, { party })
+	else
+		Matchmaker.enqueue(party)
+	end
+end
+
+-- Stop searching and play with whoever is in the party now.
+handlers.startNow = function(player, party, _payload)
+	if leaderOnly(player, party) and party.status == "searching" then
+		Matchmaker.dequeue(party)
+		task.spawn(Launcher.begin, { party })
+	end
+end
+
+handlers.cancel = function(player, party, _payload)
+	if leaderOnly(player, party) then
+		Matchmaker.dequeue(party)
+	end
+end
+
+handlers.join = function(player, _party, payload)
+	local target = if typeof(payload.partyId) == "string" then Parties.byId(payload.partyId) else nil
+	if not target or not canSee(player, target) then
+		Net.toast(player, "That party isn't open to you", "warn")
+		return
+	end
+	local ok, err = Parties.join(player, target)
+	Net.toast(player, if ok then "Joined " .. target.leader.DisplayName .. "'s party" else err or "Couldn't join", if ok then "good" else "warn")
+end
+
+local lastCodeLookup: { [Player]: number } = {}
+handlers.code = function(player, _party, payload)
+	if typeof(payload.code) ~= "string" then
+		return
+	end
+	local now = os.clock()
+	if now - (lastCodeLookup[player] or -math.huge) < CODE_LOOKUP_COOLDOWN then
+		return
+	end
+	lastCodeLookup[player] = now
+	Arrivals.joinByCode(player, payload.code, false)
+end
+
+handlers.leave = function(player, party, _payload)
+	if #party.members <= 1 then
+		return
+	end
+	if party.status == "launching" then
+		Net.toast(player, "Too late, the match is starting", "warn")
+		return
+	end
+	Parties.leave(player)
+end
+
+handlers.kick = function(player, _party, payload)
+	local target = targetOf(payload)
+	if target then
+		local ok, err = Parties.kick(player, target)
+		report(player, ok, err)
+		if ok then
+			Net.toast(target, "You were removed from the party", "warn")
+		end
+	end
+end
+
+handlers.promote = function(player, _party, payload)
+	local target = targetOf(payload)
+	if target then
+		report(player, Parties.promote(player, target))
+	end
+end
+
+handlers.rejoin = function(player, party, _payload)
+	local info = rejoinable[player]
+	if not info or party.status == "countdown" or party.status == "launching" then
+		return
+	end
+	local options = Instance.new("TeleportOptions")
+	options.ReservedServerAccessCode = info.code
+	options:SetTeleportData({ matchId = info.matchId, rejoin = true })
+	local ok, err = pcall(function()
+		TeleportService:TeleportAsync(game.PlaceId, { player }, options)
+	end)
+	if not ok then
+		warn("[LobbyManager] Rejoin failed:", err)
+		Net.toast(player, "Couldn't get back into that match", "bad")
+	end
+end
+
+handlers.dismissRejoin = function(player, _party, _payload)
+	if rejoinable[player] then
+		rejoinable[player] = nil
+		Parties.dirty = true
+		task.spawn(Presence.clearRejoin, player.UserId)
+	end
+end
+
+local lastAction: { [Player]: number } = {}
+
+Net.Action.OnServerEvent:Connect(function(player: Player, payload: any)
+	if typeof(payload) ~= "table" or typeof(payload.action) ~= "string" then
+		return
+	end
+	local handler = handlers[payload.action]
+	if not handler then
+		return
+	end
+	local now = os.clock()
+	if now - (lastAction[player] or -math.huge) < ACTION_COOLDOWN then
+		return
+	end
+	lastAction[player] = now
+	local party = Parties.of(player) or Parties.create(player)
+	handler(player, party, payload)
+	Parties.dirty = true
+end)
+
+--------------------------------------------------------------------------------
+-- Players coming and going
+--------------------------------------------------------------------------------
+
+local function onPlayerAdded(player: Player)
+	if not Parties.of(player) then
+		Parties.create(player)
+	end
+	for _, other in Players:GetPlayers() do
+		if other ~= player then
+			task.spawn(checkFriend, player, other)
+		end
+	end
+	task.spawn(Arrivals.handle, player)
+	task.spawn(checkRejoin, player)
+	task.defer(function()
+		Net.send(player, stateFor(player))
+		Net.GameStateChanged:FireClient(player, { phase = GameConfig.Phase.LOBBY })
+	end)
+end
+
+local function onPlayerRemoving(player: Player)
+	Parties.remove(player)
+	rejoinable[player] = nil
+	lastAction[player] = nil
+	lastCodeLookup[player] = nil
+	local id = player.UserId
+	for key in friendCache do
+		local a, b = string.match(key, "^(%d+):(%d+)$")
+		if tonumber(a) == id or tonumber(b) == id then
+			friendCache[key] = nil
+		end
+	end
+end
+
 for _, player in Players:GetPlayers() do
 	task.spawn(onPlayerAdded, player)
 end
 Players.PlayerAdded:Connect(onPlayerAdded)
 Players.PlayerRemoving:Connect(onPlayerRemoving)
 
---------------------------------------------------------------------------------
--- Periodic Queue Count Broadcast
---------------------------------------------------------------------------------
-
---[[
-	Every QUEUE_BROADCAST_INTERVAL seconds, push the latest queue counts
-	to all lobby players. This keeps the UI in sync even if an event
-	was somehow missed.
-]]
-task.spawn(function()
-	while true do
-		task.wait(QUEUE_BROADCAST_INTERVAL)
-		broadcastQueueCounts()
+-- A player whose teleport failed is still here: put their party back in the menu.
+TeleportService.TeleportInitFailed:Connect(function(player: Player, _result: Enum.TeleportResult, message: string)
+	local party = Parties.of(player)
+	if party and party.status == "launching" then
+		Parties.setStatus(party, "idle")
+		task.spawn(Presence.clearRejoin, player.UserId)
+		Net.send(player, { type = "cancelled", reason = "Teleport failed: " .. message })
+	elseif player.Parent then
+		Net.toast(player, "Teleport failed: " .. message, "bad")
 	end
 end)
 
---------------------------------------------------------------------------------
--- Public API (for other server scripts)
---------------------------------------------------------------------------------
+-- Studio runs the match on this server; when it ends, everyone is back in the menu.
+ServerComm.bus("PhaseChanged").Event:Connect(function(phase: number)
+	if phase == GameConfig.Phase.LOBBY then
+		for _, party in Parties.all() do
+			if party.status == "launching" then
+				Parties.setStatus(party, "idle")
+			end
+		end
+	end
+	Parties.dirty = true
+end)
 
--- Expose active matches for debugging or external systems
--- Note: this is a server script, not a module, but we keep the reference
--- accessible via a BindableFunction if needed in the future.
+task.spawn(function()
+	while true do
+		task.wait(PRESENCE_REFRESH)
+		Parties.refreshPresence()
+	end
+end)
 
-print("[LobbyManager] Lobby & matchmaking system initialized ✓")
+print("[LobbyManager] Parties and matchmaking ready")
