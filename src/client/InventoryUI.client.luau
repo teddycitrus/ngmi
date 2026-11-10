@@ -632,6 +632,8 @@ local KEY_SLOT_MAP: { [Enum.KeyCode]: number } = {
 
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 	if gameProcessed then return end
+	-- in conversation the number keys pick replies (NPCDialogue)
+	if player:GetAttribute("InDialogue") then return end
 
 	-- Number keys to select slots
 	local slotIndex = KEY_SLOT_MAP[input.KeyCode]

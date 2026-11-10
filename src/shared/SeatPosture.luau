@@ -81,7 +81,7 @@ end
 -- Arm solver
 --------------------------------------------------------------------------------
 
-type Goal = {
+export type Goal = {
 	hand: Vector3, -- hand centre, root space
 	elbow: Vector3?, -- where the elbow should rest, if anywhere
 	elbowW: number?,
@@ -174,6 +174,11 @@ local function solveArm(rig: RigPose.Rig, side: string, torso: CFrame, goal: Goa
 	end
 	return V(q[1], q[2], q[3]), V(q[4], 0, 0), w
 end
+
+--- The arm solver, for poses other than seated ones (Talk gestures): the
+--- shoulder, elbow and wrist angles that bring `side`'s hand to `goal`, with
+--- `torso` the UpperTorso's frame in the same space as the goal.
+SeatPosture.reach = solveArm
 
 --------------------------------------------------------------------------------
 -- Legs
@@ -323,6 +328,8 @@ local function mirror(g: Goal): Goal
 		fingers = if g.fingers then V(-g.fingers.X, g.fingers.Y, g.fingers.Z) else nil,
 	}
 end
+
+SeatPosture.mirror = mirror
 
 SeatPosture.STYLES = {} :: { [string]: Style }
 local S = SeatPosture.STYLES

@@ -13,6 +13,7 @@
 -- While the rig walks the walk animation wins, with only the arms pulled in to
 -- the body. Any other animation (sitting, a cutscene clip) is left alone, as
 -- are RigPose offsets on the joints' attachments, which still layer on top.
+-- In conversation, Talk/Gestures blends its gestures into the standing pose.
 --
 -- Client only and local: nothing here replicates.
 --------------------------------------------------------------------------------
@@ -22,6 +23,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local RigPose = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("RigPose"))
+local Gestures = require(script.Parent:WaitForChild("Talk"):WaitForChild("Gestures"))
 
 local TAG = "StandPosture"
 local KEEP_ARMS = "PostureKeepArms"
@@ -212,9 +214,10 @@ RunService.PreSimulation:Connect(function(dt: number)
 		e.walkW += ((if moving then 1 else 0) - e.walkW) * math.min(1, dt * 6)
 		local w = 1 - e.walkW
 		local pose = standing(now, e.seed, e.armIn)
+		local talking = Gestures.apply(model, pose, now, dt)
 		for _, j in e.joints do
 			local arm = ARM_KEYS[j.key]
-			if arm and e.keepArms then
+			if arm and e.keepArms and not talking then
 				continue
 			end
 			local anim = getT(j)

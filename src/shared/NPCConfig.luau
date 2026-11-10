@@ -14,6 +14,10 @@ export type DialogueOption = {
 export type DialogueNode = {
 	text: string,
 	options: { DialogueOption },
+	-- Client/Talk/Gestures names: what the NPC does with their hands while
+	-- saying this, in order, then the pose they hold while you answer
+	gestures: { string }?,
+	listen: string?,
 }
 
 export type NPCDefinition = {
@@ -82,6 +86,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Welcome to VesperHacks! 48 hours to build something amazing. Find a desk and get started, but maybe talk to the mentors first.",
+					gestures = { "wave", "explain" },
+					listen = "rest",
 					options = {
 						{ text = "Any tips for a first-timer?", responseId = "tips" },
 						{ text = "Where do I find supplies?", responseId = "supplies" },
@@ -91,6 +97,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				survival_hint = {
 					text = "Heh. 'Safe.' Okay, real talk: if something comes at you, SPRINT. Hold Shift, just watch your energy bar (an energy bar refills it instantly). A faceful of deodorant stuns them. Duck into a hiding spot if you must. And keep shipping your project at YOUR desk. Follow the marker to find it.",
+					gestures = { "ponder", "explain", "point" },
+					listen = "hips",
 					options = {
 						{ text = "...You're serious.", responseId = "warning" },
 						{ text = "Good to know, thanks.", responseId = nil },
@@ -98,6 +106,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				tips = {
 					text = "Pace yourself. Seriously. People who pull all-nighters on day one always burn out. Also... stay hydrated. The vending machines have some, uh, interesting options.",
+					gestures = { "ponder", "explain" },
+					listen = "rest",
 					options = {
 						{ text = "Noted. Anything else?", responseId = "warning" },
 						{ text = "Got it, thanks!", responseId = nil },
@@ -105,6 +115,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				supplies = {
 					text = "Check the supply closets around the venue. Snacks, energy drinks, deodorant... you'd be surprised what becomes valuable at 3 AM.",
+					gestures = { "point", "explain" },
+					listen = "rest",
 					options = {
 						{ text = "Deodorant? Really?", responseId = "deodorant_hint" },
 						{ text = "I'll keep an eye out.", responseId = nil },
@@ -112,12 +124,16 @@ local NPCConfig: NPCConfigType = {
 				},
 				warning = {
 					text = "One more thing. If someone starts acting... off... just give them space. Sleep deprivation does weird things to people.",
+					gestures = { "crossed" },
+					listen = "crossed",
 					options = {
 						{ text = "That's ominous.", responseId = nil },
 					},
 				},
 				deodorant_hint = {
 					text = "Trust me. By hour 30, it's the most powerful weapon in the building. *laughs nervously* I mean... socially.",
+					gestures = { "explain", "neck" },
+					listen = "rest",
 					options = {
 						{ text = "Right... thanks.", responseId = nil },
 					},
@@ -153,6 +169,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Hey! Need help with your project? I've been mentoring hackathons for years. What are you working on?",
+					gestures = { "wave", "explain" },
+					listen = "ponder",
 					options = {
 						{ text = "I'm building a survival game.", responseId = "survival" },
 						{ text = "Still figuring it out.", responseId = "figuring" },
@@ -161,6 +179,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				survival = {
 					text = "Survival, huh? Make sure your game loop is tight. Players need clear goals and constant tension. Kind of like... this hackathon. *scratches neck*",
+					gestures = { "ponder", "explain", "neck" },
+					listen = "rest",
 					options = {
 						{ text = "Are you okay?", responseId = "okay" },
 						{ text = "Good advice, thanks!", responseId = nil },
@@ -168,6 +188,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				figuring = {
 					text = "No rush. Best projects come from unexpected inspiration. Just... don't wait too long. Time moves differently here after midnight.",
+					gestures = { "ponder", "shrug" },
+					listen = "crossed",
 					options = {
 						{ text = "What do you mean?", responseId = "okay" },
 						{ text = "I'll figure something out.", responseId = nil },
@@ -175,6 +197,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				okay = {
 					text = "Yeah, yeah, I'm fine. Just... haven't slept. The code keeps... whispering? No, that's not right. Forget I said that.",
+					gestures = { "neck", "clutch" },
+					listen = "crossed",
 					options = {
 						{ text = "Maybe you should take a break.", responseId = nil },
 					},
@@ -218,6 +242,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Shh, I'm in the zone. My neural network is almost sentient. Just need more training data... more data... MORE DATA.",
+					gestures = { "hush", "clutch" },
+					listen = "crossed",
 					options = {
 						{ text = "That sounds... ambitious.", responseId = "ambitious" },
 						{ text = "I'll leave you to it.", responseId = nil },
@@ -225,6 +251,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				ambitious = {
 					text = "Ambitious? No. Inevitable. The code wants to be written. I'm just the vessel. Don't you feel it too? The pull?",
+					gestures = { "explain", "clutch" },
+					listen = "crossed",
 					options = {
 						{ text = "You should probably sleep.", responseId = "sleep" },
 						{ text = "Nope. Good luck though!", responseId = nil },
@@ -232,6 +260,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				sleep = {
 					text = "Sleep is just your brain's garbage collector. I've optimized mine. No need for sleep when you're... becoming... the algorithm...",
+					gestures = { "point", "clutch" },
+					listen = "clutch",
 					options = {
 						{ text = "Okay, that's terrifying. Bye.", responseId = nil },
 					},
@@ -275,6 +305,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Hey there! I'm Jordan from MegaCorp. We're sponsoring the API challenge. Build something cool with our SDK and win a prize!",
+					gestures = { "wave", "explain" },
+					listen = "hips",
 					options = {
 						{ text = "What's the prize?", responseId = "prize" },
 						{ text = "What does MegaCorp do?", responseId = "megacorp" },
@@ -283,12 +315,16 @@ local NPCConfig: NPCConfigType = {
 				},
 				prize = {
 					text = "Top prize is a year of free cloud credits and... well, the real prize is the experience, right? *corporate smile*",
+					gestures = { "explain", "shrug" },
+					listen = "hips",
 					options = {
 						{ text = "Sure... thanks.", responseId = nil },
 					},
 				},
 				megacorp = {
 					text = "We provide enterprise solutions for... actually, between you and me, even I don't fully understand what we do. But the API is solid!",
+					gestures = { "explain", "shrug", "neck" },
+					listen = "rest",
 					options = {
 						{ text = "Honest. I respect that.", responseId = nil },
 					},
@@ -320,6 +356,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "I'm one of the judges. I've reviewed nine hundred demos in my career, and I can tell you the secret to a winning project in three words.",
+					gestures = { "crossed", "ponder" },
+					listen = "ponder",
 					options = {
 						{ text = "What are they?", responseId = "secret" },
 						{ text = "How's the judging work?", responseId = "process" },
@@ -328,6 +366,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				secret = {
 					text = "\"Make it work.\" A flashy slide deck won't save a broken build. Ship something that runs (at YOUR desk, follow the marker) and you're already ahead of half the room.",
+					gestures = { "point", "explain" },
+					listen = "crossed",
 					options = {
 						{ text = "Solid advice.", responseId = nil },
 						{ text = "And after midnight?", responseId = "midnight" },
@@ -335,6 +375,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				process = {
 					text = "We score on completion, originality and... survival. That last one's new this year. Management insisted. I didn't ask why.",
+					gestures = { "explain", "shrug" },
+					listen = "crossed",
 					options = {
 						{ text = "Survival? That's a weird metric.", responseId = "midnight" },
 						{ text = "Noted. Thanks.", responseId = nil },
@@ -342,6 +384,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				midnight = {
 					text = "Just... finish your project before the second night. The judges who stayed late last year didn't submit anything. We never found their entries. Or them.",
+					gestures = { "ponder", "crossed" },
+					listen = "crossed",
 					options = {
 						{ text = "...I'll hurry.", responseId = nil },
 					},
@@ -372,6 +416,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Coffee bar's that way, but between us the machine's been making the weirdest noises since last night. Want a cup anyway?",
+					gestures = { "point", "neck" },
+					listen = "rest",
 					options = {
 						{ text = "Sure, I need the caffeine.", responseId = "coffee" },
 						{ text = "What kind of noises?", responseId = "noises" },
@@ -380,6 +426,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				coffee = {
 					text = "Atta dev. Pro tip: grab an energy bar from the supply rooms too. It instantly refills your sprint energy when you're running on empty. Or running, period.",
+					gestures = { "explain", "point" },
+					listen = "hips",
 					options = {
 						{ text = "Running from what?", responseId = "noises" },
 						{ text = "Good looking out. Thanks!", responseId = nil },
@@ -387,6 +435,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				noises = {
 					text = "Like... whispering? In the grinder? I keep telling the organizers and they keep changing the subject. I'm a volunteer, man, this is above my pay grade. Which is zero.",
+					gestures = { "clutch", "shrug" },
+					listen = "crossed",
 					options = {
 						{ text = "Maybe report it again.", responseId = nil },
 						{ text = "Stay safe, Max.", responseId = nil },
@@ -418,6 +468,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Oh, YOU'RE the competition? Cute. I've got a forty-thousand-line monorepo and zero working features. We're basically the same.",
+					gestures = { "hips", "explain" },
+					listen = "crossed",
 					options = {
 						{ text = "Forty thousand lines?!", responseId = "lines" },
 						{ text = "Good luck out there.", responseId = nil },
@@ -425,6 +477,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				lines = {
 					text = "Most of it's auto-generated. Some of it generated itself. I didn't write the last commit. I... don't remember writing the last commit. Have you slept? I haven't slept.",
+					gestures = { "shrug", "neck" },
+					listen = "crossed",
 					options = {
 						{ text = "You should rest, Sam.", responseId = "rest" },
 						{ text = "That's a you problem. Bye.", responseId = nil },
@@ -432,6 +486,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				rest = {
 					text = "Rest is for projects that compile. I'll sleep when it ships, or when it ships ME. Ha. Ha. ...that wasn't a joke. Why isn't it a joke?",
+					gestures = { "explain", "clutch" },
+					listen = "crossed",
 					options = {
 						{ text = "Okay, I'm going now.", responseId = nil },
 					},
@@ -468,6 +524,8 @@ local NPCConfig: NPCConfigType = {
 			dialogue = {
 				start = {
 					text = "Evening. I work the night shift here. Word of advice: learn where the exits and hiding spots are NOW, while the lights are still on.",
+					gestures = { "ponder", "point" },
+					listen = "crossed",
 					options = {
 						{ text = "Hiding spots? From who?", responseId = "who" },
 						{ text = "Where are the panels?", responseId = "panels" },
@@ -476,6 +534,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				who = {
 					text = "Couldn't tell you. But I've patrolled this building twelve years and the third floor never used to have a third floor. During Night Two, if the power drops, you do NOT want to be caught in the open.",
+					gestures = { "crossed", "ponder" },
+					listen = "crossed",
 					options = {
 						{ text = "How do I fight back?", responseId = "fight" },
 						{ text = "Comforting. Thanks.", responseId = nil },
@@ -483,6 +543,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				panels = {
 					text = "Electrical panels are in the supply rooms, one per floor. If something trips the power at night, you repair the panel to bring the lights back. Lights matter. Trust me on that.",
+					gestures = { "point", "explain" },
+					listen = "hips",
 					options = {
 						{ text = "What about defending myself?", responseId = "fight" },
 						{ text = "Got it. Thanks, Ron.", responseId = nil },
@@ -490,6 +552,8 @@ local NPCConfig: NPCConfigType = {
 				},
 				fight = {
 					text = "Deodorant. I know how that sounds, but a faceful stuns 'em long enough to run. Keep one on you at all times after dark. And SPRINT, don't try to be a hero.",
+					gestures = { "ponder", "explain" },
+					listen = "crossed",
 					options = {
 						{ text = "I owe you one, Ron.", responseId = nil },
 					},

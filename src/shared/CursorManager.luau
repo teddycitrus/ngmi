@@ -73,9 +73,25 @@ local function applyFreeCursor()
 	end
 end
 
+-- Scenes that free the mouse themselves, in first person, through Modal
+-- buttons (NPC conversations): they only need the arrow shown, not the
+-- camera pulled back.
+local iconHolds = 0
+
 --- True while at least one GUI scene currently owns a free cursor.
 function CursorManager.isOpen(): boolean
-	return openCount > 0
+	return openCount > 0 or iconHolds > 0
+end
+
+--- Show the arrow while Modal buttons free the mouse, without leaving first
+--- person (HUDController shows it whenever isOpen()). Pair with
+--- releaseIcon().
+function CursorManager.holdIcon()
+	iconHolds += 1
+end
+
+function CursorManager.releaseIcon()
+	iconHolds = math.max(0, iconHolds - 1)
 end
 
 --- Free and show the cursor. Call once when a GUI scene opens.
