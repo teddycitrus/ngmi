@@ -55,7 +55,16 @@ local ORG_GESTURES = { "welcome", "point", "emphasis", "shrug_sweep", "sprint", 
 
 -- Seconds of exterior establishing shot before the talk begins.
 local INTRO_SECONDS = 4.5
-local PER_LINE = 3.4
+-- Seconds each client gets to build the crowd and settle lighting under a
+-- black cover before the shared start time.
+local CLIENT_PREP_SECONDS = 2.5
+-- Seconds each caption stays on screen. The welcome and sign-off are short;
+-- the instructions in between stay up long enough to read twice.
+local LINE_SECONDS = { 4, 6.5, 6, 5.5, 6, 8.5, 5 }
+local talkSeconds = 0
+for _, s in LINE_SECONDS do
+	talkSeconds += s
+end
 
 -- Centre stage, clear of the lectern, where she delivers the second half.
 local SPEAKER_MARK = Vector3.new(CX - 4, FLOOR_Y + 5, STAGE_Z1 - 4)
@@ -161,6 +170,57 @@ local function collectBenches(): { Seat }
 	return benches
 end
 
+-- Every Seat that has been under the current workspace.Map, so the watchdog and
+-- the pew re-enable don't walk the whole venue. A superset: forEachMapBench
+-- re-checks the name and that the seat is still inside the Map.
+local trackedMap: Instance? = nil
+local mapSeats: { [Seat]: true } = {}
+local mapSeatConn: RBXScriptConnection? = nil
+
+local function currentMapSeats(): (Instance?, { [Seat]: true })
+	local map = workspace:FindFirstChild("Map")
+	if map ~= trackedMap then
+		if mapSeatConn then
+			mapSeatConn:Disconnect()
+			mapSeatConn = nil
+		end
+		table.clear(mapSeats)
+		trackedMap = map
+		if map then
+			for _, d in map:GetDescendants() do
+				if d:IsA("Seat") then
+					mapSeats[d] = true
+				end
+			end
+			mapSeatConn = map.DescendantAdded:Connect(function(d)
+				if d:IsA("Seat") then
+					mapSeats[d] = true
+				end
+			end)
+		end
+	end
+	return map, mapSeats
+end
+
+--- Calls fn for each Seat named BenchSeat currently inside workspace.Map.
+local function forEachMapBench(fn: (Seat) -> ())
+	local map, seats = currentMapSeats()
+	if not map then
+		return
+	end
+	local benches: { Seat } = {}
+	for seat in seats do
+		if not seat:IsDescendantOf(map) then
+			seats[seat] = nil
+		elseif seat.Name == "BenchSeat" then
+			table.insert(benches, seat)
+		end
+	end
+	for _, bench in benches do
+		fn(bench)
+	end
+end
+
 local function homeMarkerFor(id: string): BasePart?
 	for _, m in CollectionService:GetTagged(GameConfig.TAGS.NPC_SPAWN) do
 		if m:IsA("BasePart") and m.Name == id then
@@ -246,12 +306,16 @@ local function runOpening()
 		end
 	end
 
-	-- Roll the cinematic on every client.
+	-- Roll the cinematic on every client. Each client builds its set under a
+	-- black cover, then all of them start together at startAt.
+	local startAt = workspace:GetServerTimeNow() + CLIENT_PREP_SECONDS
 	for _, plr in Players:GetPlayers() do
 		CutsceneTrigger:FireClient(plr, {
 			cutscene = "opening",
+			startAt = startAt,
 			lines = ORG_LINES,
 			gestures = ORG_GESTURES,
+			durations = LINE_SECONDS,
 			intro = INTRO_SECONDS,
 			aud = AUD,
 			speakerPos = SPEAKER_POS,
@@ -266,7 +330,7 @@ local function runOpening()
 
 	-- Let the talk play out (intro + one beat per line + the applause outro, to
 	-- match the client cinematic), then everyone disperses.
-	task.wait(INTRO_SECONDS + #ORG_LINES * PER_LINE + 2.8)
+	task.wait(CLIENT_PREP_SECONDS + INTRO_SECONDS + talkSeconds + 2.8)
 
 	-- Each NPC stands, walks up the centre aisle to the north doorway, steps into
 	-- the corridor and rounds the corner — then (now out of sight) is relocated to
@@ -315,15 +379,9 @@ local function runOpening()
 	-- Once everyone has cleared out, re-enable the pews so players can sit on them.
 	-- (The anti-drift watchdog below still snaps any stray bench home as a backup.)
 	task.delay(13, function()
-		local map = workspace:FindFirstChild("Map")
-		if not map then
-			return
-		end
-		for _, d in map:GetDescendants() do
-			if d:IsA("Seat") and d.Name == "BenchSeat" then
-				d.Disabled = false
-			end
-		end
+		forEachMapBench(function(bench)
+			bench.Disabled = false
+		end)
 	end)
 
 	print("[OpeningSequence] Opening ceremony complete — NPCs dispersing.")
@@ -354,28 +412,22 @@ end)
 task.spawn(function()
 	local homes: { [Seat]: CFrame } = {}
 	while true do
-		local map = workspace:FindFirstChild("Map")
-		if map then
-			for _, d in map:GetDescendants() do
-				if d:IsA("Seat") and d.Name == "BenchSeat" then
-					local bench = d :: Seat
-					if not homes[bench] then
-						homes[bench] = bench.CFrame -- first sighting = home (auditorium)
-					elseif (bench.Position - homes[bench].Position).Magnitude > 2 then
-						local occ = bench.Occupant
-						if occ then
-							occ.Sit = false
-						end
-						local weld = bench:FindFirstChild("SeatWeld")
-						if weld then
-							weld:Destroy()
-						end
-						bench.Anchored = true
-						bench.CFrame = homes[bench]
-					end
+		forEachMapBench(function(bench)
+			if not homes[bench] then
+				homes[bench] = bench.CFrame -- first sighting = home (auditorium)
+			elseif (bench.Position - homes[bench].Position).Magnitude > 2 then
+				local occ = bench.Occupant
+				if occ then
+					occ.Sit = false
 				end
+				local weld = bench:FindFirstChild("SeatWeld")
+				if weld then
+					weld:Destroy()
+				end
+				bench.Anchored = true
+				bench.CFrame = homes[bench]
 			end
-		end
+		end)
 		task.wait(2)
 	end
 end)

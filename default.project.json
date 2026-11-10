@@ -46,7 +46,10 @@
         "EnergyRefilled": { "$className": "RemoteEvent" },
         "AdminCommand": { "$className": "RemoteEvent" },
         "EquipItem": { "$className": "RemoteEvent" },
-        "CrouchState": { "$className": "RemoteEvent" }
+        "CrouchState": { "$className": "RemoteEvent" },
+        "NightEncounter": { "$className": "RemoteEvent" },
+        "BossFX": { "$className": "RemoteEvent" },
+        "ClientReady": { "$className": "RemoteEvent" }
       }
     },
 
@@ -59,6 +62,13 @@
 
     "ServerStorage": {
       "$className": "ServerStorage"
+    },
+
+    "ReplicatedFirst": {
+      "$className": "ReplicatedFirst",
+      "LoadingScreen": {
+        "$path": "src/first/LoadingScreen.client.luau"
+      }
     },
 
     "StarterPlayer": {

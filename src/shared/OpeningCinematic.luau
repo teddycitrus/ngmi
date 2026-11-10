@@ -10,19 +10,20 @@
 --   line 4  tracking along the front row while the mentors and judges wave
 --   line 5  she jogs out from behind the lectern miming a sprint, camera
 --           tracking alongside
---   line 6  slow orbit around her counting off supplies, then a cut to one
---           kid in the crowd checking their armpit on "deodorant"
+--   line 6  slow orbit around her counting off supplies
 --   line 7  crane up and back over the applauding room
 --
--- The organizer and seated mentors are the real NPCs (posed locally through
--- their Motor6Ds; C0 edits never replicate). The rest of the audience is a
--- client-only crowd of seated actors that exists for this scene alone.
+-- The organizer is the real NPC, posed locally through RigPose (client edits
+-- never replicate). The rest of the audience is a client-only crowd of
+-- seated actors that exists for this scene alone; the seated named NPCs are
+-- hidden locally and played by look-alike actors (Opening/Audience).
 --------------------------------------------------------------------------------
 
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
+local ContentProvider = game:GetService("ContentProvider")
 
 local Shared = script.Parent
 local RigPose = require(Shared.RigPose)
@@ -44,9 +45,16 @@ export type Context = {
 	motionBlur: (number, number) -> Tween,
 }
 
-local PER_LINE = 3.4
+local PER_LINE = 3.4 -- per caption when the server sends no durations
 local LINE_LEAD = 0.3
 local OUTRO = 1.4
+local PRELOAD_TIMEOUT = 4 -- seconds the crowd/audio preload may hold the start
+local MIN_SETTLE = 1 -- seconds the camera sits on the first frame under the cover
+local MAX_START_WAIT = 6 -- never wait longer than this for the server's start time
+
+-- the named NPCs OpeningSequence seats in the front rows, and which of them wave
+local SEATED_IDS = { "npc_judge_priya", "npc_sponsor_jordan", "npc_mentor_dev", "npc_volunteer_max", "npc_hacker_alex", "npc_rival_sam", "npc_security_ron" }
+local WAVER_IDS = { npc_judge_priya = true, npc_mentor_dev = true }
 
 local SFX_WALLA = "rbxassetid://9114011338" -- theater crowd idle, light coughs
 local SFX_APPLAUSE = "rbxassetid://9113138157" -- group clap, small room
@@ -99,13 +107,38 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 
 	ctx.disableControls()
 
+	-- Black cover over everything while the set is built and the renderer
+	-- settles, so the seat teleport and crowd spawn are never seen. Lifted
+	-- when the timeline starts.
+	local cover = Instance.new("ScreenGui")
+	cover.Name = "OpeningCover"
+	cover.IgnoreGuiInset = true
+	cover.ResetOnSpawn = false
+	cover.DisplayOrder = 450
+	local coverFill = Instance.new("Frame")
+	coverFill.BackgroundColor3 = Color3.new(0, 0, 0)
+	coverFill.BorderSizePixel = 0
+	coverFill.Size = UDim2.fromScale(1, 1)
+	coverFill.Parent = cover
+	cover.Parent = ctx.playerGui
+
 	local hiddenGuis: { ScreenGui } = {}
 	for _, g in ctx.playerGui:GetChildren() do
-		if g:IsA("ScreenGui") and g.Enabled then
+		if g:IsA("ScreenGui") and g.Enabled and g ~= cover and not g:GetAttribute("CutsceneExempt") then
 			g.Enabled = false
 			table.insert(hiddenGuis, g)
 		end
 	end
+
+	-- Park the camera on the opening frame before anything moves, so the
+	-- area around it starts loading and lighting now.
+	local extFrom = ext.from or V(-70, 4, -228)
+	local extTo = ext.to or V(-40, 38, -195)
+	local extLook = ext.look or V(-30, 24, -100)
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.lookAt(extFrom, extLook)
+	camera.FieldOfView = 50
+	local prepStart = os.clock()
 
 	local char = player.Character
 	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
@@ -128,8 +161,6 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 
 	local BAR_H = 0.12
 	local barIn = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	TweenService:Create(topBar, barIn, { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
-	TweenService:Create(botBar, barIn, { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
 
 	---------------------------------------------------------------- cast
 	local set = Instance.new("Folder")
@@ -149,35 +180,24 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 		end
 	end
 	local extras = Audience.buildAudience(set, aud, cx, avoid)
-	local sniffer = Audience.castSniffer(extras, cx)
+	Audience.castChatters(extras, 6)
+	-- the seated named NPCs, swapped for local stand-ins posed with the crowd
+	local named, restoreNamed = Audience.standIns(set, SEATED_IDS)
+	for _, e in named do
+		table.insert(extras, e)
+	end
 
 	local organizer = getNPC("npc_organizer_sarah")
 	local orgRig = organizer and RigPose.new(organizer)
 	local orgHome = organizer and organizer:GetPivot()
-	local wavers: { { rig: RigPose.Rig, seed: number } } = {}
-	for _, id in { "npc_judge_priya", "npc_mentor_dev" } do
-		local m = getNPC(id)
-		if m then
-			table.insert(wavers, { rig = RigPose.new(m), seed = math.random() * 10 })
-		end
-	end
-	local clappers: { RigPose.Rig } = {}
-	for _, id in { "npc_sponsor_jordan", "npc_volunteer_max", "npc_hacker_alex", "npc_rival_sam", "npc_security_ron" } do
-		local m = getNPC(id)
-		if m then
-			table.insert(clappers, RigPose.new(m))
-		end
-	end
 
-	-- Head-tracking IK on the live NPCs would steer their heads at the player
+	-- Head-tracking IK on the organizer would steer her head at the player
 	-- and fight the poses. Hold it off locally for the scene, then restore.
 	local ikHeld: { [IKControl]: boolean } = {}
-	for _, model in { organizer :: Model?, getNPC("npc_judge_priya"), getNPC("npc_mentor_dev"), getNPC("npc_sponsor_jordan"), getNPC("npc_volunteer_max"), getNPC("npc_hacker_alex"), getNPC("npc_rival_sam"), getNPC("npc_security_ron") } do
-		if model then
-			for _, d in model:GetDescendants() do
-				if d:IsA("IKControl") then
-					ikHeld[d] = d.Enabled
-				end
+	if organizer then
+		for _, d in organizer:GetDescendants() do
+			if d:IsA("IKControl") then
+				ikHeld[d] = d.Enabled
 			end
 		end
 	end
@@ -204,10 +224,6 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 		local p = if organizer then organizer:GetPivot().Position else speakerPos
 		return p + V(0, 1.7, 0)
 	end
-
-	local extFrom = ext.from or V(-70, 4, -228)
-	local extTo = ext.to or V(-40, 38, -195)
-	local extLook = ext.look or V(-30, 24, -100)
 
 	-- Each shot: (u in 0..1, seconds into the shot) -> camera CFrame, FOV.
 	type Shot = (u: number, s: number) -> (CFrame, number)
@@ -241,17 +257,10 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 			local h = speakerHead()
 			return CFrame.lookAt(h + V(-9, -0.4, 5), h + V(1.5, -0.6, 0)), 46
 		end,
-		-- 6: orbit around her, then the cut to the sniffer
+		-- 6: slow orbit around her while she counts off the supplies
 		function(u)
-			if sniffer and u > 0.56 then
-				local head = sniffer.actor.head()
-				local hp = if head then head.Position else sniffer.pos + V(0, 3, 0)
-				local push = smooth((u - 0.56) / 0.44)
-				-- off their raised-arm side, so the face turning into the armpit reads
-				return CFrame.lookAt(hp + V(-2.8 + 0.5 * push, 0.7, -3.4 + 0.6 * push), hp + V(-0.5, -0.3, 0)), 44
-			end
 			local h = speakerHead()
-			local ang = math.rad(-40 + 62 * smooth(u / 0.56))
+			local ang = math.rad(-40 + 70 * smooth(u))
 			local pos = h + V(math.sin(ang) * 8, 0.3, math.cos(ang) * 8)
 			return CFrame.lookAt(pos, h + V(0, -0.5, 0)), 44
 		end,
@@ -284,9 +293,63 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 
 	---------------------------------------------------------------- timeline
 	local n = #lines
+	-- Seconds each caption stays up. The server sends one per line, longer
+	-- for the instructions, so players have time to read them.
+	local sent = (data.durations :: { number }?) or {}
+	local durations: { number } = {}
+	local starts: { number } = {}
+	local talkLen = 0
+	for i = 1, n do
+		durations[i] = sent[i] or PER_LINE
+		starts[i] = talkLen
+		talkLen += durations[i]
+	end
 	local talkStart = intro + LINE_LEAD
-	local total = talkStart + n * PER_LINE + OUTRO
+	local total = talkStart + talkLen + OUTRO
+
+	---------------------------------------------------------------- prep
+	-- Fetch the crowd's meshes and textures and the scene audio before the
+	-- first frame, capped so a slow asset never stalls the scene.
+	local preloadDone = false
+	task.spawn(function()
+		local list: { Instance } = { set, walla, applause }
+		if organizer then
+			table.insert(list, organizer)
+		end
+		pcall(function()
+			ContentProvider:PreloadAsync(list)
+		end)
+		preloadDone = true
+	end)
+	local preloadDeadline = os.clock() + PRELOAD_TIMEOUT
+	while not preloadDone and os.clock() < preloadDeadline do
+		task.wait()
+	end
+	-- Start on the server's shared clock so every client and the server's NPC
+	-- dispersal line up; always give the renderer a minimum settle.
+	local startAt = data.startAt :: number?
+	if startAt then
+		local untilStart = math.min(startAt - workspace:GetServerTimeNow(), MAX_START_WAIT)
+		if untilStart > 0 then
+			task.wait(untilStart)
+		end
+	end
+	local settled = os.clock() - prepStart
+	if settled < MIN_SETTLE then
+		task.wait(MIN_SETTLE - settled)
+	end
+
+	-- Live: the loading screen and the cover lift onto the first frame.
+	player:SetAttribute("OpeningLive", true)
+	TweenService:Create(coverFill, TweenInfo.new(0.7), { BackgroundTransparency = 1 }):Play()
+	task.delay(0.8, function()
+		cover:Destroy()
+	end)
+	TweenService:Create(topBar, barIn, { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
+	TweenService:Create(botBar, barIn, { Size = UDim2.new(1, 0, BAR_H, 0) }):Play()
+
 	local t0 = os.clock()
+	local walkIndex = table.find(gestures, "sprint")
 
 	local conn = RunService.RenderStepped:Connect(function(dt: number)
 		local T = os.clock() - t0
@@ -296,8 +359,15 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 		local line = 0
 		local tLine = 0
 		if T >= talkStart then
-			line = math.min(n, math.floor((T - talkStart) / PER_LINE) + 1)
-			tLine = T - talkStart - (line - 1) * PER_LINE
+			local rel = T - talkStart
+			line = n
+			for i = 1, n - 1 do
+				if rel < starts[i + 1] then
+					line = i
+					break
+				end
+			end
+			tLine = rel - starts[line]
 		end
 
 		-- camera
@@ -309,10 +379,10 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 			end
 		else
 			local shotIndex = ((line - 1) % #SHOTS) + 1
-			local shotLen = if line == n then PER_LINE + OUTRO else PER_LINE
+			local shotLen = if line == n then durations[n] + OUTRO else durations[line]
 			local u = math.clamp(tLine / shotLen, 0, 1)
 			cf, fov = SHOTS[shotIndex](u, tLine)
-			onCut(shotIndex * 10 + (if shotIndex == 6 and u > 0.56 then 1 else 0))
+			onCut(shotIndex)
 		end
 		camera.CameraType = Enum.CameraType.Scriptable
 		camera.CFrame = cf
@@ -334,7 +404,6 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 			local pose = RigPose.add(body, SpeakerChoreo.talk(T, 3.1), talkW)
 
 			-- Line 5: jog out from behind the lectern to centre stage.
-			local walkIndex = table.find(gestures, "sprint")
 			local from = orgHome.Position
 			local to = V(speakerMark.X, from.Y, speakerMark.Z)
 			local pos = from
@@ -353,26 +422,18 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 			orgRig:apply(pose, frameDt, 14)
 		end
 
-		-- mentors wave on line 4; the rest of the front row claps on line 7
+		-- crowd, named NPCs included: skip the ones far off camera to keep the
+		-- frame cheap. The mentors and judges wave on line 4. Applause is
+		-- eased hard (a soft ease shrank every clap to a third of its swing).
 		local waveW = if line == 4 then math.clamp(math.min((tLine - 0.6) / 0.3, (3.2 - tLine) / 0.3), 0, 1) else 0
-		for _, w in wavers do
-			local clapPose = if line == n and tLine > 1.3 then SpeakerChoreo.wave(T, w.seed, 1) else SpeakerChoreo.wave(T, w.seed, waveW)
-			w.rig:apply(clapPose, frameDt, 12)
-		end
-		for i, rig in clappers do
-			local on = line == n and tLine > 1.4
-			local c = math.sin(T * 4.4 * math.pi * 2 + i)
-			local pose: RigPose.Pose = if on
-				then { rS = V(50, 0, -20 + 12 * c), lS = V(50, 0, 20 - 12 * c), rE = V(-70, 0, 0), lE = V(-70, 0, 0) }
-				else {}
-			rig:apply(pose, frameDt, 12)
-		end
-
-		-- crowd: skip the ones far off camera to keep the frame cheap
 		local camPos = cf.Position
 		for _, e in extras do
 			if (e.pos - camPos).Magnitude < 90 then
-				e.actor.rig:apply(SpeakerChoreo.crowd(T, e.member, line, tLine), frameDt, 10)
+				local pose, clapW = SpeakerChoreo.crowd(T, e.member, line, tLine)
+				if waveW > 0 and e.id and WAVER_IDS[e.id] then
+					pose = SpeakerChoreo.wave(pose, T, e.member.seed, waveW)
+				end
+				e.actor.rig:apply(pose, frameDt, if clapW > 0 then 60 else 10)
 			end
 		end
 	end)
@@ -406,7 +467,7 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 					TweenService:Create(walla, TweenInfo.new(0.8), { Volume = 0.35 }):Play()
 				end)
 			end
-			task.wait(PER_LINE - 0.35)
+			task.wait(durations[i] - 0.35)
 			TweenService:Create(caption, TweenInfo.new(0.25), { TextTransparency = 1 }):Play()
 			task.wait(0.35)
 		end
@@ -434,12 +495,7 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 	if organizer and orgHome then
 		organizer:PivotTo(orgHome)
 	end
-	for _, w in wavers do
-		w.rig:reset()
-	end
-	for _, rig in clappers do
-		rig:reset()
-	end
+	restoreNamed()
 	for ik, was in ikHeld do
 		if ik.Parent then
 			ik.Enabled = was

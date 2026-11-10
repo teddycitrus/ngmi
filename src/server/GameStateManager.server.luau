@@ -315,13 +315,14 @@ end
 --------------------------------------------------------------------------------
 -- Day2 → Night2 transition cutscene.
 -- The client plays a long cinematic (CutsceneManager "nightTransition"): the
--- player dozes off, a montage shows the other hackers mutating into NGMIs, a
--- storm kills the power, and the player wakes into the dark. We hold the phase
--- for NIGHT_TRANSITION_HOLD so the flip to NIGHT2 lands mid-montage, while the
+-- player dozes off, one hacker turns NGMI and attacks another while a third
+-- watches and turns too, a storm kills the power, and the player wakes into
+-- the dark. We hold the phase for NIGHT_TRANSITION_HOLD so the flip to NIGHT2
+-- lands mid-scene, while the
 -- camera is on the off-map cutscene set and the real venue is hidden — the
 -- venue is already dark (Night2_Horror lighting) by the time the eyes open.
 --------------------------------------------------------------------------------
-local NIGHT_TRANSITION_HOLD = 38 -- seconds; lands mid turn-montage, while the venue is still hidden
+local NIGHT_TRANSITION_HOLD = 19 -- seconds; lands as the witness watches, while the venue is still hidden
 
 local function triggerNightTransitionCutscene(match: MatchState)
 	fireToAll(CutsceneTrigger, match, { cutscene = "nightTransition" })
@@ -572,24 +573,105 @@ end)
 -- off by LobbyManager through the StartMatch bus below.)
 --------------------------------------------------------------------------------
 if ServerRole.isMatchServer then
-	local MATCH_START_GRACE = 3 -- seconds to let the whole party teleport in
+	local MATCH_START_GRACE = 0.5 -- seconds after the whole party has loaded
+	local MAX_PARTY_WAIT = 20 -- stop waiting for a party member who never arrives
+	local MAX_LOAD_WAIT = 60 -- start anyway if someone's client never reports loaded
 
-	local function tryStartReservedMatch()
+	-- Clients fire ClientReady from their loading screen once the venue and
+	-- its assets have loaded. The opening only starts when everyone has.
+	local ClientReady = Remotes:WaitForChild("ClientReady") :: RemoteEvent
+	local loaded: { [Player]: boolean } = {}
+
+	-- The lobby sends the party size along as teleport data.
+	local expectedPartySize = 1
+	local firstArrival: number? = nil
+	local startScheduled = false
+
+	local function readPartySize(player: Player)
+		local ok, joinData = pcall(function()
+			return player:GetJoinData()
+		end)
+		local teleportData = ok and typeof(joinData) == "table" and (joinData :: any).TeleportData
+		local size = typeof(teleportData) == "table" and (teleportData :: any).queueSize
+		if typeof(size) == "number" then
+			expectedPartySize = math.max(expectedPartySize, math.clamp(math.floor(size), 1, 4))
+		end
+	end
+
+	local function startNow()
 		if activeMatch then
 			return
 		end
 		local present = Players:GetPlayers()
-		if #present == 0 then
-			return
+		if #present > 0 then
+			GameStateManager.startMatch(present)
 		end
-		GameStateManager.startMatch(present)
 	end
 
-	Players.PlayerAdded:Connect(function()
-		task.delay(MATCH_START_GRACE, tryStartReservedMatch)
+	local function scheduleStart()
+		if activeMatch or startScheduled then
+			return
+		end
+		local present = Players:GetPlayers()
+		if #present < expectedPartySize then
+			return
+		end
+		for _, p in present do
+			if not loaded[p] then
+				return
+			end
+		end
+		startScheduled = true
+		task.delay(MATCH_START_GRACE, startNow)
+	end
+
+	-- A party member who loads in after the match started joins it in progress
+	-- instead of being left out of the roster with no phase.
+	local function joinInProgress(player: Player)
+		local match = activeMatch
+		if not match or match.ended or table.find(match.players, player) then
+			return
+		end
+		table.insert(match.players, player)
+		print("[GameState]", player.Name, "joined match", match.matchId, "in progress")
+		task.spawn(assignDesks, match.players)
+		GameStateChanged:FireClient(player, { phase = match.currentPhase, matchId = match.matchId })
+	end
+
+	local function onMatchServerPlayer(player: Player)
+		if activeMatch then
+			joinInProgress(player)
+			return
+		end
+		readPartySize(player)
+		if not firstArrival then
+			firstArrival = os.clock()
+			-- a missing party member: go with whoever made it, once they load
+			task.delay(MAX_PARTY_WAIT, function()
+				expectedPartySize = math.min(expectedPartySize, math.max(#Players:GetPlayers(), 1))
+				scheduleStart()
+			end)
+			task.delay(MAX_LOAD_WAIT, startNow)
+		end
+		scheduleStart()
+	end
+
+	ClientReady.OnServerEvent:Connect(function(player: Player)
+		if loaded[player] then
+			return
+		end
+		loaded[player] = true
+		scheduleStart()
 	end)
-	for _, _existing in Players:GetPlayers() do
-		task.delay(MATCH_START_GRACE, tryStartReservedMatch)
+	Players.PlayerRemoving:Connect(function(player: Player)
+		loaded[player] = nil
+		-- the one holding everyone up may have just left
+		task.defer(scheduleStart)
+	end)
+
+	Players.PlayerAdded:Connect(onMatchServerPlayer)
+	for _, existing in Players:GetPlayers() do
+		task.spawn(onMatchServerPlayer, existing)
 	end
 end
 
