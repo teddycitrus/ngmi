@@ -187,22 +187,21 @@ end
 local function createNPCModel(def: NPCConfig.NPCDefinition): Model
 	-- Real Roblox R15 avatar rig (falls back to a block rig if the avatar API
 	-- is unavailable — see RigFactory).
-	local model, humanoid = RigFactory.create()
+	-- Each named NPC has their own body, skin, hair and clothes (Rig/Looks).
+	local model, humanoid = RigFactory.create(def.id)
 	model.Name = def.id
 	humanoid.WalkSpeed = 8 -- casual patrol speed
 
-	-- Tint the torso/sleeves with this NPC's signature hoodie colour so the
-	-- named characters are recognisable.
-	for _, partName in { "UpperTorso", "LowerTorso", "LeftUpperArm", "RightUpperArm", "Torso" } do
-		local part = model:FindFirstChild(partName)
-		if part and part:IsA("BasePart") then
-			part.Color = def.hoodieColor
+	-- Only the block fallback rig needs the old tint and part-built look.
+	if not model:GetAttribute("Look") then
+		for _, partName in { "UpperTorso", "LowerTorso", "LeftUpperArm", "RightUpperArm", "Torso" } do
+			local part = model:FindFirstChild(partName)
+			if part and part:IsA("BasePart") then
+				part.Color = def.hoodieColor
+			end
 		end
+		applyAppearance(model, def)
 	end
-
-	-- Give each named NPC a distinct look (skin/hair/accessories) so they read as
-	-- individual people instead of identical hoodie rigs.
-	applyAppearance(model, def)
 
 	model:PivotTo(resolveSpawnCFrame(def))
 
@@ -212,6 +211,7 @@ local function createNPCModel(def: NPCConfig.NPCDefinition): Model
 	-- IK: glance at whoever walks past, and keep both feet on the actual surface
 	-- underfoot so they don't float above the stairwell treads.
 	RigFactory.enableHeadTracking(model, humanoid)
+	RigFactory.enableBodyTurn(model, humanoid)
 	RigFactory.enableFootPlacement(model, humanoid)
 
 	return model
@@ -457,11 +457,7 @@ local function startCorruption(runtime: NPCRuntime)
 	-- cranked-forearm NGMI silhouette over the corruption window, with a tremor
 	-- riding on top. Head tracking is dropped first so the neck is free to cock,
 	-- a corrupting NPC should stop making polite eye contact.
-	local headLook = model:FindFirstChild("HeadLookAt", true)
-	if headLook and headLook:IsA("IKControl") then
-		headLook.Enabled = false
-		headLook.Weight = 0
-	end
+	model:SetAttribute(RigFactory.HEAD_TRACK_SUSPEND, true)
 	runtime.articulationThread = RigFactory.rampArticulation(model, CORRUPTION_POSE_SECONDS)
 
 	-- Cycle through corruption lines in overhead text
@@ -502,6 +498,7 @@ local function stopCorruption(runtime: NPCRuntime)
 	local model = runtime.model
 	if model then
 		RigFactory.resetArticulation(model)
+		model:SetAttribute(RigFactory.HEAD_TRACK_SUSPEND, nil)
 	end
 end
 

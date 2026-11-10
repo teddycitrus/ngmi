@@ -112,7 +112,7 @@ ReplicatedFirst:RemoveDefaultLoadingScreen()
 
 local shown = 0 -- displayed progress, eased toward target
 local target = 0
-local renderConn = RunService.RenderStepped:Connect(function(dt: number)
+RunService.RenderStepped:Connect(function(dt: number)
 	shown += (target - shown) * math.min(1, dt * 6)
 	fill.Size = UDim2.fromScale(shown, 1)
 	local t = (os.clock() * 0.6) % 1
@@ -221,18 +221,115 @@ else
 end
 
 --------------------------------------------------------------------------------
--- Reveal
+-- Reveal, and cover again for the match start
 --------------------------------------------------------------------------------
-target = 1
-task.wait(0.15)
-local fade = TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-TweenService:Create(bg, fade, { BackgroundTransparency = 1 }):Play()
-for _, label in { title, status } do
-	TweenService:Create(label, fade, { TextTransparency = 1 }):Play()
+local fadeInfo = TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local fadeTweens: { Tween } = {}
+
+local function setVisible(alpha: number, tweenIt: boolean)
+	for _, t in fadeTweens do
+		t:Cancel()
+	end
+	table.clear(fadeTweens)
+	local function set(inst: Instance, props: { [string]: number })
+		if tweenIt then
+			local t = TweenService:Create(inst, fadeInfo, props)
+			t:Play()
+			table.insert(fadeTweens, t)
+		else
+			for k, v in props do
+				(inst :: any)[k] = v
+			end
+		end
+	end
+	set(bg, { BackgroundTransparency = alpha })
+	set(title, { TextTransparency = alpha })
+	set(status, { TextTransparency = alpha })
+	set(track, { BackgroundTransparency = alpha })
+	set(fill, { BackgroundTransparency = alpha })
+	set(shimmer, { BackgroundTransparency = if alpha < 1 then 0.75 else 1 })
 end
-for _, f in { track, fill, shimmer } do
-	TweenService:Create(f, fade, { BackgroundTransparency = 1 }):Play()
+
+local function reveal()
+	target = 1
+	task.wait(0.15)
+	setVisible(1, true)
+	task.wait(0.75)
+	gui.Enabled = false
 end
-task.wait(0.75)
-renderConn:Disconnect()
-gui:Destroy()
+
+reveal()
+
+-- Leaving the mode menu starts the match: on this server (Studio, or a lobby
+-- fallback) the phase flips to DAY1, or the lobby teleports the party to a
+-- match server. Either way the screen goes straight back to this loader, with
+-- no fade in, so nothing between the menu and the opening's first frame is
+-- ever seen: not the menu fading, the HUD's day banner or the seat teleport.
+local covering = false
+local cancelled = false
+local function coverUntilOpening(text: string)
+	if covering or player:GetAttribute("OpeningLive") then
+		return
+	end
+	covering = true
+	cancelled = false
+	shown, target = 0.9, 0.9
+	status.Text = text
+	gui.Enabled = true
+	setVisible(0, false)
+	local openBy = os.clock() + OPENING_TIMEOUT
+	local phaseNow = ReplicatedStorage:FindFirstChild("CurrentPhase") :: IntValue?
+	while not player:GetAttribute("OpeningLive") and not cancelled and os.clock() < openBy do
+		-- an admin jump past DAY1 skips the opening; don't wait it out
+		if phaseNow and phaseNow.Value > 1 then
+			break
+		end
+		task.wait()
+	end
+	reveal()
+	covering = false
+end
+
+local TeleportService = game:GetService("TeleportService")
+local remotes2 = ReplicatedStorage:WaitForChild("Remotes")
+
+-- Same-server start (Studio): StartGame, then the phase flips below.
+local startGame = remotes2:WaitForChild("StartGame") :: RemoteEvent
+startGame.OnClientEvent:Connect(function()
+	task.spawn(coverUntilOpening, "Starting match")
+end)
+
+-- Lobby server: the party is being teleported to a match server. The cover
+-- rides along as the teleport screen, so the match server's own loader takes
+-- over from an identical screen. A failed teleport hands the menu back.
+local queueUpdate = remotes2:WaitForChild("QueueUpdate") :: RemoteEvent
+queueUpdate.OnClientEvent:Connect(function(payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	if payload.type == "launching" then
+		pcall(function()
+			local carry = gui:Clone()
+			carry.Enabled = true
+			TeleportService:SetTeleportGui(carry)
+		end)
+		task.spawn(coverUntilOpening, "Starting match")
+	elseif payload.type == "cancelled" and covering then
+		cancelled = true
+	end
+end)
+
+local phase = ReplicatedStorage:WaitForChild("CurrentPhase", 30) :: IntValue?
+if phase then
+	local last = phase.Value
+	phase.Changed:Connect(function(value: number)
+		local was = last
+		last = value
+		if value == 0 then
+			-- back in the lobby: the next match plays its own opening
+			player:SetAttribute("OpeningLive", nil)
+		elseif was == 0 then
+			task.spawn(coverUntilOpening, "Starting match")
+		end
+	end)
+end

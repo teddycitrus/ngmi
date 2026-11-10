@@ -11,138 +11,139 @@ local RunService = game:GetService("RunService")
 local IK = {}
 
 --------------------------------------------------------------------------------
--- Head tracking (IKControl, Type = LookAt)
+-- Head glance
 --------------------------------------------------------------------------------
--- One shared Heartbeat loop drives EVERY registered rig. The venue can hold ~100
--- ambient rigs, and a thread or RenderStep each would be untenable; a single
--- throttled pass with an early distance reject costs almost nothing.
+-- The glance itself runs on each client (client/HeadGlance): a slow, capped
+-- turn of the neck alone, toward that client's own player, only when they pass
+-- close in front. The server only marks which rigs take part. (It used to be a
+-- server LookAt IKControl rooted at the UpperTorso, which bent the whole spine
+-- and swung heads up to 180 degrees at players 26 studs away.)
 --------------------------------------------------------------------------------
 
-local HEAD_TRACK_RANGE = 26 -- studs; beyond this the head returns to neutral
-local HEAD_TRACK_INTERVAL = 0.1 -- seconds between solver updates (10 Hz)
-local HEAD_TRACK_LERP = 0.18 -- weight easing per update, so heads never snap
+local CollectionService = game:GetService("CollectionService")
 
-type HeadTracker = {
-	model: Model,
-	control: IKControl,
-	target: Attachment,
-	root: BasePart,
-}
+IK.GLANCE_TAG = "HeadGlance"
+-- Boolean attribute on the rig's model that holds its head at rest.
+IK.SUSPEND_ATTRIBUTE = "HeadTrackSuspended"
 
-local headTrackers: { HeadTracker } = {}
-local headLoopStarted = false
+--- Let a rig glance at players who pass close in front of it.
+function IK.enableHeadTracking(model: Model, _hum: Humanoid?): ()
+	CollectionService:AddTag(model, IK.GLANCE_TAG)
+end
 
---- Nearest position from a prepared list, within `range`. The list is gathered
---- once per tick by the loop below rather than per rig: with ~90 tracked rigs,
---- re-walking Players:GetPlayers() for each one is two orders of magnitude more
---- work for the same answer.
-local function nearestFrom(positions: { Vector3 }, origin: Vector3, range: number): Vector3?
-	local best: Vector3? = nil
-	local bestDist = range
-	for _, position in positions do
-		local dist = (position - origin).Magnitude
-		if dist < bestDist then
-			bestDist = dist
-			best = position
+--------------------------------------------------------------------------------
+-- Body turn (named NPCs standing still)
+--------------------------------------------------------------------------------
+-- Someone hanging around right behind a standing NPC gets noticed: after a
+-- moment the NPC turns, slowly, on the spot to face them. Walking, anchored
+-- (seated, posed for a cutscene) and suspended NPCs never turn.
+--------------------------------------------------------------------------------
+
+local TURN_RANGE = 7 -- studs
+local TURN_BEHIND = math.rad(110) -- off their facing before it counts as behind
+local TURN_DWELL = 1.2 -- seconds someone has to stay there first
+local TURN_RATE = math.rad(110) -- per second
+local TURN_INTERVAL = 0.05
+
+type Turner = { model: Model, hum: Humanoid, root: BasePart, since: number?, goal: Vector3? }
+local turners: { Turner } = {}
+local turnLoop = false
+
+local function nearestPlayerRoot(origin: Vector3): Vector3?
+	local best, bestDist = nil, TURN_RANGE
+	for _, p in Players:GetPlayers() do
+		local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+		if r and r:IsA("BasePart") then
+			local d = (r.Position - origin).Magnitude
+			if d < bestDist then
+				best, bestDist = r.Position, d
+			end
 		end
 	end
 	return best
 end
 
-local function startHeadTrackLoop()
-	if headLoopStarted then
+local function startTurnLoop()
+	if turnLoop then
 		return
 	end
-	headLoopStarted = true
-
-	local accumulator = 0
-	RunService.Heartbeat:Connect(function(deltaTime: number)
-		accumulator += deltaTime
-		if accumulator < HEAD_TRACK_INTERVAL then
+	turnLoop = true
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt: number)
+		acc += dt
+		if acc < TURN_INTERVAL then
 			return
 		end
-		accumulator = 0
-
-		-- Gather eye-height targets once for the whole pass.
-		local eyePositions: { Vector3 } = {}
-		for _, player in Players:GetPlayers() do
-			local character = player.Character
-			local root = character and character:FindFirstChild("HumanoidRootPart")
-			if root and root:IsA("BasePart") then
-				-- Aim at head height rather than the root, or NPCs stare at chests.
-				table.insert(eyePositions, (root :: BasePart).Position + Vector3.new(0, 1.5, 0))
+		local step = acc
+		acc = 0
+		local now = os.clock()
+		for i = #turners, 1, -1 do
+			local t = turners[i]
+			if not t.model.Parent or not t.root.Parent then
+				table.remove(turners, i)
+				continue
 			end
-		end
-
-		-- Nobody in the venue: let every head settle back to neutral and skip the
-		-- per-rig work entirely.
-		local anyone = #eyePositions > 0
-
-		for i = #headTrackers, 1, -1 do
-			local tracker = headTrackers[i]
-
-			-- Reap rigs that have been despawned.
-			if not tracker.model.Parent or not tracker.root.Parent then
-				table.remove(headTrackers, i)
+			local root = t.root
+			local v = root.AssemblyLinearVelocity
+			local idle = not root.Anchored
+				and Vector3.new(v.X, 0, v.Z).Magnitude < 0.5
+				and t.hum.MoveDirection.Magnitude < 0.1
+				and not t.model:GetAttribute(IK.SUSPEND_ATTRIBUTE)
+				and not t.model:GetAttribute("CutsceneControlled")
+			if not idle then
+				t.since, t.goal = nil, nil
 				continue
 			end
 
-			local targetPos = if anyone then nearestFrom(eyePositions, tracker.root.Position, HEAD_TRACK_RANGE) else nil
-			if targetPos then
-				tracker.target.WorldPosition = targetPos
-				tracker.control.Enabled = true
-				tracker.control.Weight += (1 - tracker.control.Weight) * HEAD_TRACK_LERP
-			else
-				tracker.control.Weight += (0 - tracker.control.Weight) * HEAD_TRACK_LERP
-				if tracker.control.Weight < 0.02 then
-					tracker.control.Weight = 0
-					tracker.control.Enabled = false
+			if not t.goal then
+				local target = nearestPlayerRoot(root.Position)
+				local behind = false
+				if target then
+					local to = Vector3.new(target.X - root.Position.X, 0, target.Z - root.Position.Z)
+					local fwd = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+					if to.Magnitude > 0.5 and fwd.Magnitude > 0.1 then
+						behind = math.acos(math.clamp(to.Unit:Dot(fwd.Unit), -1, 1)) > TURN_BEHIND
+					end
+				end
+				if behind and target then
+					t.since = t.since or now
+					if now - t.since >= TURN_DWELL then
+						t.goal = target
+					end
+				else
+					t.since = nil
+				end
+			end
+
+			local goal = t.goal
+			if goal then
+				local to = Vector3.new(goal.X - root.Position.X, 0, goal.Z - root.Position.Z)
+				local fwd = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+				if to.Magnitude < 0.5 or fwd.Magnitude < 0.1 then
+					t.goal, t.since = nil, nil
+					continue
+				end
+				local cur = math.atan2(-fwd.X, -fwd.Z)
+				local want = math.atan2(-to.X, -to.Z)
+				local diff = (want - cur + math.pi) % (2 * math.pi) - math.pi
+				local turn = math.clamp(diff, -TURN_RATE * step, TURN_RATE * step)
+				root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, cur + turn, 0)
+				if math.abs(diff) < math.rad(3) then
+					t.goal, t.since = nil, nil
 				end
 			end
 		end
 	end)
 end
 
---- Make a rig glance at the nearest player. Safe to call on anchored rigs (the
---- seated ambient crowd), LookAt only drives the neck chain, so it layers over
---- a sit animation and the hand-set shoulder poses without fighting them.
-function IK.enableHeadTracking(model: Model, hum: Humanoid): IKControl?
-	local head = model:FindFirstChild("Head")
-	local torso = model:FindFirstChild("UpperTorso")
+--- Let a free-standing NPC turn round to face someone lingering behind it.
+function IK.enableBodyTurn(model: Model, hum: Humanoid): ()
 	local root = model:FindFirstChild("HumanoidRootPart")
-	if
-		not (head and head:IsA("BasePart"))
-		or not (torso and torso:IsA("BasePart"))
-		or not (root and root:IsA("BasePart"))
-	then
-		return nil -- R6 fallback rig has no UpperTorso; nothing to drive
+	if not (root and root:IsA("BasePart")) then
+		return
 	end
-
-	-- Parented to the rig's own root so it is destroyed along with the rig
-	-- instead of leaking an attachment when the NPC despawns.
-	local target = Instance.new("Attachment")
-	target.Name = "HeadTrackTarget"
-	target.Parent = root
-
-	local control = Instance.new("IKControl")
-	control.Name = "HeadLookAt"
-	control.Type = Enum.IKControlType.LookAt
-	control.ChainRoot = torso
-	control.EndEffector = head
-	control.Target = target
-	control.Weight = 0
-	control.Enabled = false
-	control.Parent = hum
-
-	table.insert(headTrackers, {
-		model = model,
-		control = control,
-		target = target,
-		root = root :: BasePart,
-	})
-	startHeadTrackLoop()
-
-	return control
+	table.insert(turners, { model = model, hum = hum, root = root })
+	startTurnLoop()
 end
 
 --------------------------------------------------------------------------------
@@ -206,6 +207,9 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 		return -- R6 fallback rig
 	end
 
+	-- Weight a planted foot gets; Running below lowers it while walking.
+	local plantedWeight = 1
+
 	task.spawn(function()
 		while model.Parent and rootPart.Parent do
 			task.wait(FOOT_INTERVAL)
@@ -224,7 +228,7 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 					-- than sinking its centre into it.
 					chain.target.WorldPosition = hit.Position + Vector3.new(0, chain.foot.Size.Y * 0.5, 0)
 					chain.control.Enabled = true
-					chain.control.Weight = 1
+					chain.control.Weight = plantedWeight
 				else
 					chain.control.Enabled = false
 					chain.control.Weight = 0
@@ -241,9 +245,11 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 	-- Foot IK fights the walk animation's own foot placement at speed, so fade it
 	-- out while running and back in when the NPC settles.
 	hum.Running:Connect(function(speed: number)
-		local moving = speed > 0.5
+		plantedWeight = if speed > 0.5 then 0.35 else 1
 		for _, chain in chains do
-			chain.control.Weight = if moving then 0.35 else 1
+			if chain.control.Enabled then
+				chain.control.Weight = plantedWeight
+			end
 		end
 	end)
 end

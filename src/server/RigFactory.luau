@@ -73,10 +73,11 @@ local function buildTemplate(desc: HumanoidDescription, key: string): Model?
 	return nil
 end
 
--- The shop bodies stand 6.3 to 7.5 studs; the venue (desk chairs, couches,
--- the seated root offsets in Ambient/Seats and AmbientPopulation) was fitted
--- to a ~5.4-stud R15. Every look is scaled to that height.
-local TARGET_HEIGHT = 5.4
+-- The shop bodies come in at 6.3 to 7.5 studs. Every look is scaled to an
+-- adult 6.4 (times the look's own height multiplier), tall next to the player
+-- avatar. Seated placement still fits: at this build the seated hip sits only
+-- ~0.1 stud higher above the root than on the old 5.4-stud bodies.
+local TARGET_HEIGHT = 6.4
 
 local function standingHeight(model: Model): number
 	local head = model:FindFirstChild("Head") :: BasePart?
@@ -98,9 +99,29 @@ local function getTemplate(look: Looks.Look): Model?
 	if t == nil then
 		local built = buildTemplate(Looks.describe(look), look.key)
 		if built then
-			local h = standingHeight(built)
-			if h > 0 and math.abs(h - TARGET_HEIGHT) > 0.05 then
-				built:ScaleTo(built:GetScale() * TARGET_HEIGHT / h)
+			-- Joints only settle once the rig is in the workspace: measured
+			-- unparented, the height read 10-15% high. Park it out of sight,
+			-- pinned, for a frame.
+			local root = built:FindFirstChild("HumanoidRootPart") :: BasePart?
+			local wasAnchored = root and root.Anchored
+			if root then
+				root.Anchored = true
+			end
+			built:PivotTo(CFrame.new(0, 5000, 0))
+			built.Parent = workspace
+			task.wait()
+			local want = TARGET_HEIGHT * (look.height or 1)
+			for _ = 1, 2 do
+				local h = standingHeight(built)
+				if h <= 0 or math.abs(h - want) < 0.05 then
+					break
+				end
+				built:ScaleTo(built:GetScale() * want / h)
+				task.wait()
+			end
+			built.Parent = nil
+			if root then
+				root.Anchored = wasAnchored :: boolean
 			end
 		end
 		t = built or false
@@ -379,6 +400,7 @@ function RigFactory.applyHair(model: Model, ...: any): string?
 	return Hair.applyHair(model, ...)
 end
 RigFactory.enableHeadTracking = IK.enableHeadTracking
+RigFactory.enableBodyTurn = IK.enableBodyTurn
 RigFactory.enableFootPlacement = IK.enableFootPlacement
 RigFactory.HEAD_TRACK_SUSPEND = IK.SUSPEND_ATTRIBUTE
 RigFactory.articulate = Articulation.articulate

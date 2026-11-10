@@ -136,7 +136,7 @@ export type Look = {
 	face: { number }?,
 	clothes: { Item },
 	shoes: { number },
-	height: number?,
+	height: number?, -- multiplier on RigFactory's standing height
 	width: number?,
 }
 
@@ -151,19 +151,19 @@ end
 -- The crowd: four plain hackathon outfits, each on its own person.
 Looks.CROWD = {
 	look("crowdA", PERSON.kenji, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
-	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite),
+	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite, { height = 0.95 }),
 	look("crowdC", PERSON.deshawn, HAIR.blackBuzz, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan),
-	look("crowdD", PERSON.nia, HAIR.blackCurly, { TOP.greyTee, TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey),
+	look("crowdD", PERSON.nia, HAIR.blackCurly, { TOP.greyTee, TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey, { height = 0.95 }),
 } :: { Look }
 
 -- The named NPCs: each one a colour and cut nobody in the crowd wears.
 Looks.NAMED = {
 	-- salmon blazer on stage, readable from the back row
-	npc_organizer_sarah = look("sarah", PERSON.emma, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack),
+	npc_organizer_sarah = look("sarah", PERSON.emma, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack, { height = 0.95 }),
 	-- red ruffle skirt under a pinstripe coat
-	npc_judge_priya = look("priya", PERSON.mei, HAIR.salonBun, { TOP.tieTopWhite, TOP.coatStripe, BOTTOM.ruffleRed }, SHOES.dressBlack, { face = { GLASSES } }),
+	npc_judge_priya = look("priya", PERSON.mei, HAIR.salonBun, { TOP.tieTopWhite, TOP.coatStripe, BOTTOM.ruffleRed }, SHOES.dressBlack, { face = { GLASSES }, height = 0.95 }),
 	-- white leather jacket, the sponsor money look
-	npc_sponsor_jordan = look("jordan", PERSON.deshawn, HAIR.buzzStache, { TOP.stripeTeeBlack, TOP.leatherWhite, BOTTOM.khaki }, SHOES.dressBrown),
+	npc_sponsor_jordan = look("jordan", PERSON.deshawn, HAIR.buzzStache, { TOP.stripeTeeBlack, TOP.leatherWhite, BOTTOM.khaki }, SHOES.dressBrown, { height = 1.03 }),
 	-- denim over a loud floral shirt
 	npc_mentor_dev = look("dev", PERSON.mateo, HAIR.curlyTextured, { TOP.floralForest, TOP.denimLight, BOTTOM.beige }, SHOES.canvasGrey, { face = { GLASSES } }),
 	-- volunteer orange, basketball shorts, red runners
@@ -171,9 +171,9 @@ Looks.NAMED = {
 	-- teal hoodie and shades pushed up
 	npc_hacker_alex = look("alex", PERSON.kenji, HAIR.shadesHair, { TOP.stripeTeeBlack, TOP.zipTeal, BOTTOM.cargoBlack }, SHOES.highWhite),
 	-- black leather over red, white leather pants
-	npc_rival_sam = look("sam", PERSON.claire, HAIR.grungePony, { TOP.longSleeveRed, TOP.leatherBlack, BOTTOM.leatherWhite }, SHOES.milBlack),
+	npc_rival_sam = look("sam", PERSON.claire, HAIR.grungePony, { TOP.longSleeveRed, TOP.leatherBlack, BOTTOM.leatherWhite }, SHOES.milBlack, { height = 0.95 }),
 	-- all black, the guard
-	npc_security_ron = look("ron", PERSON.mateo, HAIR.buzz, { TOP.knitBlack, BOTTOM.formalBlack }, SHOES.milBlack),
+	npc_security_ron = look("ron", PERSON.mateo, HAIR.buzz, { TOP.knitBlack, BOTTOM.formalBlack }, SHOES.milBlack, { height = 1.04, width = 1.08 }),
 } :: { [string]: Look }
 
 function Looks.describe(l: Look): HumanoidDescription
@@ -200,11 +200,15 @@ function Looks.describe(l: Look): HumanoidDescription
 	add(l.shoes[2], "shoeR")
 	d:SetAccessories(layered, false)
 
-	d.HeightScale = l.height or 1
+	-- The bodies' own adult build. BodyTypeScale below 1 pulls a shop body
+	-- toward classic Roblox proportions (big head, short legs), which is what
+	-- made the crowd read as children. Overall size is set by RigFactory.
+	d.HeightScale = 1
 	d.WidthScale = l.width or 1
 	d.DepthScale = 1
-	d.BodyTypeScale = 0.3
-	d.ProportionScale = 1
+	d.HeadScale = 1
+	d.BodyTypeScale = 1
+	d.ProportionScale = 0
 	return d
 end
 

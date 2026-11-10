@@ -102,11 +102,15 @@ local function spawnSeated(seat: Part)
 	model:PivotTo(CFrame.lookAt(pos + V(0, 2.6, 0), pos + V(0, 2.6, faceZ)))
 	model.Parent = folder
 	RigFactory.sit(model, hum)
-	pose(model, DESK_POSES[math.random(#DESK_POSES)])
+	local deskPose = DESK_POSES[math.random(#DESK_POSES)]
+	pose(model, deskPose)
 
-	-- Glance up from the screen at whoever walks past. Anchored, seated rigs
-	-- get head tracking only; foot IK is for rigs that actually walk.
-	RigFactory.enableHeadTracking(model, hum)
+	-- Glance up from the screen at whoever walks past (anyone not passed out
+	-- face-down on the desk). Foot IK is for rigs that actually walk.
+	local slumped = deskPose.waist ~= nil and deskPose.waist.X >= 40
+	if not slumped then
+		RigFactory.enableHeadTracking(model, hum)
+	end
 
 	-- Most coders work off a laptop: hide the workstation's monitor and set a
 	-- laptop on the desk in front of them. The station is the seat's parent
