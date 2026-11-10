@@ -11,7 +11,10 @@
 --                             shifting between feet
 --   walk(gait)                legs for crossing the stage
 --   crowd(t, member, line, tLine)  a seated audience member: idle fidget plus
---                             the room's reaction to the current line
+--                             the room's reaction to the current line (or a
+--                             chat with the neighbour), and the applause
+--   idle(t, member)           sitting idle, the base every crowd pose builds on
+--   wave(pose, t, seed, w)    a front-row mentor waving over `pose`
 --
 -- Poses are in RigPose's authoring convention (degrees).
 --------------------------------------------------------------------------------
@@ -200,8 +203,10 @@ export type Member = {
 	lean: number, -- -1 slouched back .. 1 perched forward
 	phone: boolean, -- half-listening, eyes on their lap
 	keen: number, -- 0..1, how readily they join a reaction
-	sniffer: boolean?, -- the one who checks their armpit on "deodorant"
-	neighbourOfSniffer: number?, -- -1 / 1: which side the sniffer is on
+	chat: number?, -- -1 / 1: neck yaw sign toward the neighbour they chat with
+	chatSeed: number?, -- shared by both halves of a pair, so they take turns
+	chatLead: boolean?, -- which half of the pair speaks first
+	clapShut: number?, -- shoulder roll that brings this body's palms together (fitClap)
 }
 
 local SEAT_BASE: Pose = {
@@ -215,18 +220,89 @@ local SEAT_BASE: Pose = {
 	lE = V(-52, 0, 0),
 }
 
--- clap() and laugh() are deltas added over SEAT_BASE.
-local CLAP_HZ = 4.4
+-- Applause: shoulders raised 50, elbows at -60, and the shoulders rolled in
+-- until the palms meet. Where they meet depends on the body (measured -43 to
+-- -46 on most, -58 on the long-armed Realistic Man), so each actor's closing
+-- roll is solved by fitClap; CLAP_SHUT is the fallback. The open end of the
+-- swing is CLAP_SWING short of it.
+local CLAP_SHUT = -47
+local CLAP_SWING = 17
+local CLAP_SHOULDER = 50
+local CLAP_ELBOW = -60
 
-local function clap(t: number, m: Member): Pose
-	local c = math.sin(t * CLAP_HZ * math.pi * 2 + m.seed)
+local function clapArms(z: number): Pose
 	return {
-		rS = V(24, 0, -18 + 12 * c),
-		lS = V(24, 0, 18 - 12 * c),
-		rE = V(-22, 0, 0),
-		lE = V(-22, 0, 0),
-		neck = V(-4, 0, 0),
+		rS = V(CLAP_SHOULDER, 0, z),
+		lS = V(CLAP_SHOULDER, 0, -z),
+		rE = V(CLAP_ELBOW, 0, 0),
+		lE = V(CLAP_ELBOW, 0, 0),
 	}
+end
+
+--- Solve the shoulder roll at which this actor's palms touch, into m.clapShut.
+function SpeakerChoreo.fitClap(rig: RigPose.Rig, m: Member)
+	local lh = rig.model:FindFirstChild("LeftHand")
+	local rh = rig.model:FindFirstChild("RightHand")
+	if not (lh and lh:IsA("BasePart") and rh and rh:IsA("BasePart")) then
+		return
+	end
+	-- centres a hand's thickness apart is palm to palm; a little less presses
+	local touch = (lh.Size.X + rh.Size.X) / 2 * 0.85
+	local best, bestGap = CLAP_SHUT, math.huge
+	for z = -30, -85, -1 do
+		local pose = clapArms(z)
+		local l, r = rig:handIn("l", pose), rig:handIn("r", pose)
+		if not (l and r) then
+			return
+		end
+		local gap = (l - r).Magnitude
+		if gap <= touch then
+			best = z
+			break
+		end
+		if gap < bestGap then
+			best, bestGap = z, gap
+		end
+	end
+	m.clapShut = best
+end
+
+--- Both arms clapping, replacing whatever the arms were doing in `p`.
+--- The swing is clipped at both ends, so the hands rest together for about a
+--- fifth of each beat: a pure sine only touches for an instant, which a frame
+--- (or the caller's smoothing) easily misses, and the hands never meet.
+local function clapping(p: Pose, t: number, m: Member): Pose
+	local hz = 3.3 + (m.seed % 1) * 0.9
+	local c = math.cos((t * hz + m.seed) * math.pi * 2)
+	local s = math.clamp(0.5 + 0.75 * c, 0, 1)
+	local shut = m.clapShut or CLAP_SHUT
+	local z = shut + CLAP_SWING * (1 - s)
+	local out = table.clone(p)
+	for key, v in clapArms(z) do
+		out[key] = v
+	end
+	out.neck = (p.neck or Vector3.zero) * V(0.3, 0.3, 0.3) + V(-4, 0, 0)
+	return out
+end
+
+--- Turned toward the neighbour, taking turns to talk: the speaker nods and
+--- talks with one hand, the listener nods along now and then.
+local function chatting(p: Pose, t: number, m: Member): Pose
+	local side = m.chat or 1
+	local seed = m.chatSeed or m.seed
+	local turn = math.floor((t + seed) / 2.2) % 2 == 0
+	local talking = if m.chatLead then turn else not turn
+	local out = add(p, { waist = V(2, 9 * side, 0) })
+	-- replaces the idle head, so nobody looks down at a phone mid-conversation
+	local nod = if talking then 5 * math.sin(t * 6.5 + seed) else 4 * math.max(0, math.sin(t * 2.4 + m.seed))
+	out.neck = V(4 + nod + 2 * noise(m.seed, 21, t * 0.6), 36 * side + 5 * noise(m.seed, 22, t * 0.4), 3 * side)
+	if talking then
+		-- talks with the hand on the partner's side, swung out toward them
+		local outward = if side > 0 then -1 else 1
+		out[if side > 0 then "lS" else "rS"] = V(38 + 8 * math.sin(t * 2.3 + seed), 0, (12 + 6 * math.sin(t * 3.1)) * outward)
+		out[if side > 0 then "lE" else "rE"] = V(-78 + 14 * math.sin(t * 3.7 + seed), 0, 0)
+	end
+	return out
 end
 
 local function laugh(t: number, m: Member): Pose
@@ -248,8 +324,70 @@ local function window(t: number, t0: number, t1: number, edge: number): number
 end
 
 --- A seated audience member at time `t`, during caption `line` (0 = before
---- the talk starts), `tLine` seconds into that line.
-function SpeakerChoreo.crowd(t: number, m: Member, line: number, tLine: number): Pose
+--- the talk starts), `tLine` seconds into that line. The second return is the
+--- applause weight: clapping is too fast for the crowd's usual pose smoothing,
+--- so the caller eases harder while it is above 0.
+function SpeakerChoreo.crowd(t: number, m: Member, line: number, tLine: number): (Pose, number)
+	if m.chat then
+		-- a pair talking among themselves through the speech; they still
+		-- laugh at the sprint and join both rounds of applause
+		local p = chatting(SpeakerChoreo.idle(t, m), t, m)
+		local clapW = 0
+		if line == 1 then
+			clapW = window(tLine, 0.1, 2.6, 0.25)
+		elseif line == 7 then
+			clapW = window(tLine, 1.35, 6, 0.3)
+		elseif line == 5 then
+			p = add(p, RigPose.scale(laugh(t, m), window(tLine, 0.7, 3.2, 0.3)))
+		end
+		return RigPose.blend(p, clapping(p, t, m), clapW), clapW
+	end
+	local p = SpeakerChoreo.idle(t, m)
+	local s = m.seed
+	local clapW = 0
+	if line == 1 then
+		-- everyone applauds the welcome, for as long as the applause plays
+		clapW = window(tLine, 0.1, 2.6, 0.25)
+		p = RigPose.blend(p, clapping(p, t, m), clapW)
+	elseif line == 2 then
+		if m.keen > 0.5 then
+			p = add(p, { neck = V(8 * math.max(0, math.sin(tLine * 6 + s)), 0, 0) })
+		end
+	elseif line == 3 then
+		-- "...before the second night is over." Groans, hands on heads.
+		local w = window(tLine, 1.5, 3.3, 0.3)
+		if m.keen > 0.72 then
+			p = add(p, { rS = V(118 * w, 0, -10 * w), lS = V(118 * w, 0, 10 * w), rE = V(-60 * w, 0, 0), lE = V(-60 * w, 0, 0), neck = V(-22 * w, 0, 0), waist = V(-8 * w, 0, 0) })
+		elseif m.keen > 0.35 then
+			p = add(p, { neck = V(10 * w, 12 * w * math.sin(tLine * 5 + s), 0) })
+		end
+	elseif line == 4 then
+		-- everyone looks toward the mentors in the front row
+		local w = window(tLine, 0.8, 3.3, 0.4)
+		p = add(p, { neck = V(10 * w, 0, 0), waist = V(4 * w, 0, 0) })
+	elseif line == 5 then
+		-- the sprint mime gets a laugh
+		local w = window(tLine, 0.7, 3.2, 0.3)
+		if m.keen > 0.4 then
+			p = RigPose.blend(p, add(p, laugh(t, m)), w)
+		end
+	elseif line == 6 then
+		-- a few chuckle at the deodorant
+		if m.keen > 0.8 then
+			local w = window(tLine, 2.2, 3.3, 0.3)
+			p = RigPose.blend(p, add(p, laugh(t, m)), w * 0.7)
+		end
+	elseif line == 7 then
+		-- "Good luck, hackers!" The whole room applauds through the applause.
+		clapW = window(tLine, 1.35, 6, 0.3)
+		p = RigPose.blend(p, clapping(p, t, m), clapW)
+	end
+	return p, clapW
+end
+
+--- Sitting idle: breathing, a slow weight shift, the odd glance around, and
+--- for the phone users, eyes on the screen in their lap.
+function SpeakerChoreo.idle(t: number, m: Member): Pose
 	local s = m.seed
 	local breath = math.sin(t * 1.7 + s)
 	local glance = math.max(0, noise(s, 9, t * 0.18) - 0.35) * 2.2 -- occasional
@@ -266,77 +404,23 @@ function SpeakerChoreo.crowd(t: number, m: Member, line: number, tLine: number):
 	if m.phone then
 		p = add(p, { rS = V(-6, 0, 2), lS = V(-6, 0, -2), rE = V(-42, 0, 0), lE = V(-42, 0, 0) })
 	end
-
-	local joins = function(threshold: number): boolean
-		return m.keen > threshold
-	end
-
-	if line == 1 then
-		-- a round of applause for the welcome, a few whoops with a fist up
-		local w = window(tLine, 0.2, 2.2, 0.25)
-		if joins(0.3) then
-			p = RigPose.blend(p, add(p, clap(t, m)), w)
-		end
-		if m.keen > 0.88 then
-			p = add(p, { rS = V(120 * w, 0, 10 * w), rE = V(40 * w, 0, 0) })
-		end
-	elseif line == 2 then
-		if joins(0.5) then
-			p = add(p, { neck = V(8 * math.max(0, math.sin(tLine * 6 + s)), 0, 0) })
-		end
-	elseif line == 3 then
-		-- "...before the second night is over." Groans, hands on heads.
-		local w = window(tLine, 1.5, 3.3, 0.3)
-		if m.keen > 0.72 then
-			p = add(p, { rS = V(118 * w, 0, -10 * w), lS = V(118 * w, 0, 10 * w), rE = V(-60 * w, 0, 0), lE = V(-60 * w, 0, 0), neck = V(-22 * w, 0, 0), waist = V(-8 * w, 0, 0) })
-		elseif joins(0.35) then
-			p = add(p, { neck = V(10 * w, 12 * w * math.sin(tLine * 5 + s), 0) })
-		end
-	elseif line == 4 then
-		-- everyone looks toward the mentors in the front row
-		local w = window(tLine, 0.8, 3.3, 0.4)
-		p = add(p, { neck = V(10 * w, 0, 0), waist = V(4 * w, 0, 0) })
-	elseif line == 5 then
-		-- the sprint mime gets a laugh
-		local w = window(tLine, 0.7, 3.2, 0.3)
-		if joins(0.4) then
-			p = RigPose.blend(p, add(p, laugh(t, m)), w)
-		end
-	elseif line == 6 then
-		if m.sniffer then
-			-- lifts an arm and checks
-			local w = window(tLine, 1.7, 3.3, 0.25)
-			p = add(p, { lS = V(40 * w, 0, -118 * w), lE = V(-60 * w, 0, 0), neck = V(32 * w, 52 * w, 14 * w), waist = V(6 * w, 20 * w, 12 * w) })
-		elseif m.neighbourOfSniffer then
-			-- the people beside them lean away and crack up
-			local w = window(tLine, 2.0, 3.3, 0.3)
-			local side = m.neighbourOfSniffer :: number
-			p = add(p, add(RigPose.scale(laugh(t, m), w), { waist = V(0, 0, 10 * w * side), neck = V(0, -30 * w * side, 0) }))
-		elseif joins(0.8) then
-			local w = window(tLine, 2.2, 3.3, 0.3)
-			p = RigPose.blend(p, add(p, laugh(t, m)), w * 0.7)
-		end
-	elseif line == 7 then
-		-- "Good luck, hackers!" Big applause, fists in the air.
-		local w = window(tLine, 1.3, 6, 0.3)
-		if m.keen > 0.82 then
-			p = RigPose.blend(p, add(SEAT_BASE, { rS = V(160, 0, 12), lS = V(150, 0, -14), rE = V(-20, 0, 0), lE = V(-30, 0, 0), waist = V(-6, 0, 0), neck = V(-14, 0, 0) }), w)
-		elseif joins(0.12) then
-			p = RigPose.blend(p, add(p, clap(t, m)), w)
-		end
-	end
+	-- hands drift a little on the lap, so nobody sits frozen
+	p = add(p, {
+		rS = V(3 * noise(s, 14, t * 0.3), 0, 2 * noise(s, 15, t * 0.25)),
+		lS = V(3 * noise(s, 16, t * 0.3), 0, 2 * noise(s, 17, t * 0.25)),
+	})
 	return p
 end
 
---- Arm wave for the named mentors and judges in the front row. Layered over
---- their live sit animation, so only the arm and head move.
-function SpeakerChoreo.wave(t: number, seed: number, w: number): Pose
+--- Arm wave for the named mentors and judges in the front row: the right arm
+--- up and waving, blended in by `w` over whatever the arms were doing.
+function SpeakerChoreo.wave(p: Pose, t: number, seed: number, w: number): Pose
 	local s = math.sin(t * 9 + seed)
-	return {
-		rS = V(150 * w, 0, (14 + 22 * s) * w),
-		rE = V(-30 * w, 0, 0),
-		neck = V(-6 * w, 0, 0),
-	}
+	local up = table.clone(p)
+	up.rS = V(150, 0, 14 + 22 * s)
+	up.rE = V(-30, 0, 0)
+	up.neck = (p.neck or Vector3.zero) + V(-6, 0, 0)
+	return RigPose.blend(p, up, w)
 end
 
 return SpeakerChoreo

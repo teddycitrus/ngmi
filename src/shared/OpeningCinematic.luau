@@ -433,7 +433,13 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 				if waveW > 0 and e.id and WAVER_IDS[e.id] then
 					pose = SpeakerChoreo.wave(pose, T, e.member.seed, waveW)
 				end
-				e.actor.rig:apply(pose, frameDt, if clapW > 0 then 60 else 10)
+				-- in full applause the pose is written exactly: any easing
+				-- rounds off the moment the palms meet
+				if clapW >= 0.98 then
+					e.actor.rig:apply(pose)
+				else
+					e.actor.rig:apply(pose, frameDt, if clapW > 0 then 60 else 10)
+				end
 			end
 		end
 	end)

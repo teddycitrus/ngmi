@@ -150,7 +150,9 @@ end
 -- Foot placement (IKControl, Type = Position)
 --------------------------------------------------------------------------------
 -- Plants each foot on whatever surface is actually under it, so NPCs walking the
--- venue's stairwell stop floating a few studs above the treads.
+-- venue's stairwell stop floating a few studs above the treads. On level floor
+-- the legs already reach the ground and the solver stays off: aimed even a
+-- little high it folds the knees.
 --
 -- Only worth enabling on rigs that MOVE. The ambient crowd is anchored and
 -- seated, so it gets head tracking only.
@@ -159,6 +161,7 @@ end
 local FOOT_PROBE_HEIGHT = 3 -- studs above the foot to start the down-ray
 local FOOT_PROBE_DEPTH = 5 -- studs below the foot to search
 local FOOT_INTERVAL = 0.08 -- seconds between solver updates
+local FOOT_UNEVEN = 0.2 -- studs a foot's ground must differ from level to engage
 
 local LEGS = {
 	{ upper = "LeftUpperLeg", foot = "LeftFoot", name = "LeftFootIK" },
@@ -178,7 +181,7 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 	params.FilterDescendantsInstances = { model }
 	params.IgnoreWater = true
 
-	type FootChain = { control: IKControl, target: Attachment, foot: BasePart }
+	type FootChain = { control: IKControl, target: Attachment, foot: BasePart, rest: number }
 	local chains: { FootChain } = {}
 
 	for _, leg in LEGS do
@@ -199,7 +202,14 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 			control.Enabled = false
 			control.Parent = hum
 
-			table.insert(chains, { control = control, target = target, foot = foot :: BasePart })
+			-- How high this body's foot centre sits above the ground when standing
+			-- straight. Read now, while the fresh clone is still in its rest pose;
+			-- realistic feet are not a box resting on the floor, so half the
+			-- part's height is no good.
+			local footPart = foot :: BasePart
+			local level = rootPart.Position.Y - hum.HipHeight - rootPart.Size.Y / 2
+			local rest = math.clamp(footPart.Position.Y - level, 0.05, 1)
+			table.insert(chains, { control = control, target = target, foot = footPart, rest = rest })
 		end
 	end
 
@@ -223,10 +233,9 @@ function IK.enableFootPlacement(model: Model, hum: Humanoid): ()
 				local hit =
 					workspace:Raycast(origin, Vector3.new(0, -(FOOT_PROBE_HEIGHT + FOOT_PROBE_DEPTH), 0), params)
 
-				if hit then
-					-- Half the foot's height keeps the sole on the surface rather
-					-- than sinking its centre into it.
-					chain.target.WorldPosition = hit.Position + Vector3.new(0, chain.foot.Size.Y * 0.5, 0)
+				local level = rootPart.Position.Y - hum.HipHeight - rootPart.Size.Y / 2
+				if hit and math.abs(hit.Position.Y - level) > FOOT_UNEVEN then
+					chain.target.WorldPosition = hit.Position + Vector3.new(0, chain.rest, 0)
 					chain.control.Enabled = true
 					chain.control.Weight = plantedWeight
 				else

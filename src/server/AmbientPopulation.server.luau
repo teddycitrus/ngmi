@@ -230,6 +230,8 @@ local function spawnLeaning(spot: Part)
 	-- Pivot about the feet, tip the body back onto the wall, then stand it up.
 	model:PivotTo(CFrame.lookAt(feet, feet + face) * CFrame.Angles(LEAN_TILT, 0, 0) * CFrame.new(0, rootH, 0))
 	model.Parent = folder
+	-- the lean poses' arms were authored over the stock idle's arms
+	model:SetAttribute(RigFactory.POSTURE_KEEP_ARMS, true)
 	RigFactory.stand(model, hum)
 
 	local which = math.random(#LEAN_POSES)

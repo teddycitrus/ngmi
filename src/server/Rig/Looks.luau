@@ -115,7 +115,7 @@ local SHOES = {
 local HAIR = {
 	brownLayered = 100202592246873, -- Brown Short Messy Layered Hair
 	brownBun = 122117226947549, -- low messy bun in brown
-	blackBuzz = 14631577537, -- Black Buzz Cut
+	blackBuzz = 14631577537, -- Black Buzz Cut (sinks into the realistic heads; reads bald)
 	blackCurly = 76461613235817, -- Black Messy Curly Hair
 	blonde = 107817078459185, -- Blonde Hair
 	salonBun = 105162488813710, -- Black Classy Curly Salon Bun
@@ -152,7 +152,7 @@ end
 Looks.CROWD = {
 	look("crowdA", PERSON.kenji, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
 	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite, { height = 0.95 }),
-	look("crowdC", PERSON.deshawn, HAIR.blackBuzz, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan),
+	look("crowdC", PERSON.deshawn, HAIR.blackCurly, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan),
 	look("crowdD", PERSON.nia, HAIR.blackCurly, { TOP.greyTee, TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey, { height = 0.95 }),
 } :: { Look }
 

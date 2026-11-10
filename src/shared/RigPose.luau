@@ -44,12 +44,14 @@ export type Rig = {
 	J: { [string]: Instance }, -- a Motor6D, or an AnimationConstraint's Attachment0
 	base: { [string]: CFrame },
 	far: { [string]: CFrame }, -- C1 / Attachment1.CFrame, for joint maths
+	motor: { [string]: boolean }, -- J keys whose handle is a Motor6D (else an Attachment)
 	cur: Pose,
 	apply: (self: Rig, pose: Pose, dt: number?, sharpness: number?) -> (),
 	write: (self: Rig, pose: Pose) -> (),
 	rebase: (self: Rig, pose: Pose) -> (),
 	reset: (self: Rig) -> (),
 	seatOffset: (self: Rig) -> number,
+	handIn: (self: Rig, side: string, pose: Pose) -> Vector3?,
 }
 
 -- key -> { part that owns the motor, motor name }
@@ -163,30 +165,18 @@ function RigPose.angles(v: Vector3): CFrame
 end
 
 --- Joint-space rotation for an authored Euler on `key`.
-function RigPose.jointAngles(key: string, v: Vector3): CFrame
+local function jointAngles(key: string, v: Vector3): CFrame
 	local x = if FLIP_X[key] then -v.X else v.X
 	return CFrame.Angles(math.rad(x), math.rad(v.Y), math.rad(v.Z))
 end
+RigPose.jointAngles = jointAngles
 
 local function offsetFor(key: string, v: Vector3, pos: Vector3?): CFrame
-	local cf = RigPose.jointAngles(key, v)
+	local cf = jointAngles(key, v)
 	if key == "root" and pos then
 		return CFrame.new(pos) * cf
 	end
 	return cf
-end
-
-local function writeJoint(rig: Rig, key: string, v: Vector3, pos: Vector3?)
-	local j = rig.J[key]
-	if not (j and j.Parent) then
-		return
-	end
-	local cf = rig.base[key] * offsetFor(key, v, pos)
-	if j:IsA("Motor6D") then
-		j.C0 = cf
-	elseif j:IsA("Attachment") then
-		j.CFrame = cf
-	end
 end
 
 --- Wrap a model in a poser. Captures every joint's current pose as its base.
@@ -197,6 +187,7 @@ function RigPose.new(model: Model): Rig
 		J = {},
 		base = {},
 		far = {},
+		motor = {},
 		cur = {},
 	} :: any
 	for key, names in RigPose.JOINTS do
@@ -205,6 +196,7 @@ function RigPose.new(model: Model): Rig
 			rig.J[key] = j
 			rig.base[key] = base
 			rig.far[key] = far
+			rig.motor[key] = j:IsA("Motor6D")
 		end
 	end
 
@@ -216,18 +208,22 @@ function RigPose.new(model: Model): Rig
 		if dt and sharpness then
 			k = 1 - math.exp(-sharpness * dt)
 		end
-		for key in self.J do
-			local target = pose[key] or ZERO
-			local now = self.cur[key] or ZERO
-			local v = now:Lerp(target, k)
-			self.cur[key] = v
-		end
-		local targetPos = pose.rootPos or ZERO
-		local nowPos = self.cur.rootPos or ZERO
-		self.cur.rootPos = nowPos:Lerp(targetPos, k)
-		for key, v in self.cur do
-			if key ~= "rootPos" then
-				writeJoint(self, key, v, self.cur.rootPos)
+		-- cur only ever holds J keys and rootPos, so one pass over J eases and
+		-- writes every joint. rootPos goes first: the root joint needs it.
+		local cur = self.cur
+		local rootPos = (cur.rootPos or ZERO):Lerp(pose.rootPos or ZERO, k)
+		cur.rootPos = rootPos
+		local base, motor = self.base, self.motor
+		for key, j in self.J do
+			local v = (cur[key] or ZERO):Lerp(pose[key] or ZERO, k)
+			cur[key] = v
+			if j.Parent then
+				local cf = base[key] * offsetFor(key, v, rootPos)
+				if motor[key] then
+					(j :: Motor6D).C0 = cf
+				else
+					(j :: Attachment).CFrame = cf
+				end
 			end
 		end
 	end
@@ -254,6 +250,21 @@ function RigPose.new(model: Model): Rig
 	--- Distance from the root down to the underside of the thighs when seated
 	--- (hips at -90), solved from the joint offsets rather than read back from
 	--- part positions, which lag a step behind a C0 change.
+	--- Where a hand's centre would be under `pose`, in UpperTorso space, solved
+	--- through the arm's joint frames (part positions lag a step behind a
+	--- pose change, so they can't be read back the same frame). side: "l"/"r".
+	function rig.handIn(self: Rig, side: string, pose: Pose): Vector3?
+		local cf = CFrame.identity
+		for _, k in { side .. "S", side .. "E", side .. "W" } do
+			local base, far = self.base[k], self.far[k]
+			if not (base and far) then
+				return nil
+			end
+			cf = cf * base * jointAngles(k, pose[k] or ZERO) * far:Inverse()
+		end
+		return cf.Position
+	end
+
 	function rig.seatOffset(self: Rig): number
 		local leg = self.model:FindFirstChild("RightUpperLeg")
 		if not (self.base.root and self.base.rH and leg and leg:IsA("BasePart")) then

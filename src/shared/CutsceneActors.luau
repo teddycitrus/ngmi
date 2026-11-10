@@ -113,6 +113,25 @@ function CutsceneActors.spawn(opts: SpawnOpts): Actor?
 		return nil
 	end
 
+	-- Tags clone too, and a clone of a gameplay NGMI (or a tagged NPC) must not
+	-- be picked up by the scripts that drive the real ones.
+	local CollectionService = game:GetService("CollectionService")
+	local function untag(d: Instance)
+		for _, tag in CollectionService:GetTags(d) do
+			CollectionService:RemoveTag(d, tag)
+		end
+	end
+	untag(model)
+	for _, d in model:GetDescendants() do
+		untag(d)
+	end
+
+	-- props an ambient sitter holds (a desk laptop, a phone) stay with the original
+	for _, c in model:GetChildren() do
+		if c:IsA("Model") or c.Name == "Phone" or c.Name == "PhoneScreen" then
+			c:Destroy()
+		end
+	end
 	for _, d in model:GetDescendants() do
 		local clothes = d:IsA("Shirt") or d:IsA("Pants") or d:IsA("ShirtGraphic")
 		if shouldStrip(d) or (opts.stripClothes and clothes) then
@@ -145,6 +164,31 @@ function CutsceneActors.spawn(opts: SpawnOpts): Actor?
 	end
 
 	RigPose.ensureMotors(model)
+	-- Ambient rigs carry their posture (typing, passed out on the desk, arms
+	-- folded) folded into the joint attachments, and a clone inherits it.
+	-- RigFactory records each joint's rest frame ("RestFrame"); the shop
+	-- bodies' attachments are rotated at rest, so that is what the clone goes
+	-- back to. A rig without one (a classic R15, whose joint attachments are
+	-- all unrotated) just drops the rotation.
+	-- The clone also keeps the last frame of the source's animation in each
+	-- joint's Transform (a sitter's arms, a walker's mid-stride), and with the
+	-- Animator stripped nothing ever clears it, so it is zeroed here too.
+	for _, d in model:GetDescendants() do
+		if d:IsA("AnimationConstraint") then
+			d.Transform = CFrame.identity
+			if d.Attachment0 then
+				local a0 = d.Attachment0 :: Attachment
+				local rest = a0:GetAttribute("RestFrame")
+				a0.CFrame = if typeof(rest) == "CFrame" then rest else CFrame.new(a0.Position)
+			end
+		elseif d:IsA("Motor6D") then
+			d.Transform = CFrame.identity
+			local rest = d:GetAttribute("RestFrame")
+			if typeof(rest) == "CFrame" then
+				d.C0 = rest
+			end
+		end
+	end
 
 	local hum = model:FindFirstChildOfClass("Humanoid")
 	if hum then
@@ -163,6 +207,16 @@ function CutsceneActors.spawn(opts: SpawnOpts): Actor?
 	end
 	model:PivotTo(opts.cframe)
 	model.Parent = opts.parent
+	if not opts.repaint then
+		-- A clone of a named NPC came out black: its part colours are set on
+		-- the server, and the clone loses them. Copy them from the source.
+		for _, p in model:GetChildren() do
+			local from = source:FindFirstChild(p.Name)
+			if p:IsA("BasePart") and from and from:IsA("BasePart") then
+				p.Color = from.Color
+			end
+		end
+	end
 
 	local cf = opts.cframe
 	local actor: any = {

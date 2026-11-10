@@ -2,8 +2,8 @@
 --------------------------------------------------------------------------------
 -- Opening/Audience.luau
 -- The seated crowd for OpeningCinematic: finds the auditorium benches, seats
--- local extras along them (clear of the real NPCs), and picks the one who
--- checks their armpit on "deodorant".
+-- local extras along them (clear of the real NPCs), picks the pairs who
+-- chat, and stands in for the seated named NPCs.
 --------------------------------------------------------------------------------
 
 local Shared = script.Parent.Parent
@@ -20,7 +20,7 @@ local Audience = {}
 -- Audience
 --------------------------------------------------------------------------------
 
-export type Extra = { actor: CutsceneActors.Actor, member: SpeakerChoreo.Member, pos: Vector3 }
+export type Extra = { actor: CutsceneActors.Actor, member: SpeakerChoreo.Member, pos: Vector3, id: string? }
 
 function Audience.collectBenches(aud: { [string]: number }): { BasePart }
 	local out: { BasePart } = {}
@@ -87,15 +87,17 @@ function Audience.buildAudience(parent: Instance, aud: { [string]: number }, cx:
 			})
 			if actor then
 				CutsceneActors.seat(actor, slot.pos, V(0, 0, -1), slot.top)
+				local member: SpeakerChoreo.Member = {
+					seed = math.random() * 100,
+					lean = math.random() * 2 - 1,
+					phone = math.random() < 0.12,
+					keen = math.random(),
+				}
+				SpeakerChoreo.fitClap(actor.rig, member)
 				table.insert(extras, {
 					actor = actor,
 					pos = slot.pos,
-					member = {
-						seed = math.random() * 100,
-						lean = math.random() * 2 - 1,
-						phone = math.random() < 0.12,
-						keen = math.random(),
-					},
+					member = member,
 				})
 			end
 		end
@@ -103,28 +105,89 @@ function Audience.buildAudience(parent: Instance, aud: { [string]: number }, cx:
 	return extras
 end
 
---- Pick the armpit-sniffer: someone in the first two rows near the centre,
---- and mark whoever sits right beside them.
-function Audience.castSniffer(extras: { Extra }, cx: number): Extra?
-	local best: Extra? = nil
-	local bestScore = math.huge
-	for _, e in extras do
-		local score = math.abs(e.pos.X - (cx + 12)) + (e.pos.Z + 64) * 2
-		if not e.member.phone and score < bestScore then
-			best = e
-			bestScore = score
+--- Pair up a few neighbours (front rows first, where the camera is) who chat
+--- among themselves through the talk.
+function Audience.castChatters(extras: { Extra }, count: number)
+	local free: { Extra } = table.clone(extras)
+	table.sort(free, function(a, b)
+		if math.abs(a.pos.Z - b.pos.Z) > 1 then
+			return a.pos.Z < b.pos.Z
+		end
+		return a.pos.X < b.pos.X
+	end)
+	local made = 0
+	local i = 1
+	while i < #free and made < count do
+		local a, b = free[i], free[i + 1]
+		if math.abs(a.pos.Z - b.pos.Z) < 1 and math.abs(a.pos.X - b.pos.X) < SEAT_SPACING * 1.6 and math.random() < 0.6 then
+			-- the audience faces -Z, so a neighbour at higher X is on the right (neck yaw -)
+			local seed = math.random() * 10
+			a.member.chat, b.member.chat = -1, 1
+			a.member.chatSeed, b.member.chatSeed = seed, seed
+			a.member.chatLead = true
+			a.member.phone, b.member.phone = false, false
+			made += 1
+			i += 3 -- leave a gap so pairs don't run together along a row
+		else
+			i += 1
 		end
 	end
-	if best then
-		best.member.sniffer = true
-		for _, e in extras do
-			if e ~= best and math.abs(e.pos.Z - best.pos.Z) < 1 and math.abs(e.pos.X - best.pos.X) < SEAT_SPACING * 1.6 then
-				e.member.neighbourOfSniffer = if e.pos.X < best.pos.X then 1 else -1
-				e.member.phone = false
+end
+
+--- The seated named NPCs play the server's sit animation, and RigPose offsets
+--- layer under an animation, so poses on them never landed where intended
+--- (their claps never met). For the scene each one is hidden locally and a
+--- look-alike actor sits in its place, posed like the rest of the crowd.
+--- Returns the stand-ins and a function that puts the real NPCs back.
+function Audience.standIns(parent: Instance, ids: { string }): ({ Extra }, () -> ())
+	local out: { Extra } = {}
+	local hidden: { [BasePart]: number } = {}
+	local names: { [Humanoid]: Enum.HumanoidDisplayDistanceType } = {}
+	local npcs = workspace:FindFirstChild("NPCs")
+	local map = workspace:FindFirstChild("Map")
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { map :: Instance }
+	for _, id in ids do
+		local npc = npcs and npcs:FindFirstChild(id)
+		local root = npc and npc:FindFirstChild("HumanoidRootPart")
+		if not (map and npc and npc:IsA("Model") and root and root:IsA("BasePart")) then
+			continue
+		end
+		local hit = workspace:Raycast(root.Position, V(0, -6, 0), params)
+		local actor = hit and CutsceneActors.spawn({ source = npc, parent = parent, cframe = npc:GetPivot() })
+		if not (hit and actor) then
+			continue
+		end
+		local pos = V(root.Position.X, hit.Position.Y, root.Position.Z)
+		CutsceneActors.seat(actor, pos, root.CFrame.LookVector, hit.Position.Y)
+		table.insert(out, {
+			actor = actor,
+			pos = pos,
+			id = id,
+			member = { seed = math.random() * 100, lean = math.random() * 0.6 - 0.3, phone = false, keen = 1 },
+		})
+		SpeakerChoreo.fitClap(actor.rig, out[#out].member)
+		for _, d in npc:GetDescendants() do
+			if d:IsA("BasePart") then
+				hidden[d] = d.LocalTransparencyModifier
+				d.LocalTransparencyModifier = 1
 			end
 		end
+		local hum = npc:FindFirstChildOfClass("Humanoid")
+		if hum then
+			names[hum] = hum.DisplayDistanceType
+			hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		end
 	end
-	return best
+	return out, function()
+		for part, was in hidden do
+			part.LocalTransparencyModifier = was
+		end
+		for hum, was in names do
+			hum.DisplayDistanceType = was
+		end
+	end
 end
 
 return Audience

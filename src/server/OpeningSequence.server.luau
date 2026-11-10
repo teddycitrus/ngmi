@@ -347,6 +347,7 @@ local function runOpening()
 		end
 		setPromptEnabled(m, true)
 		if h and r and r:IsA("BasePart") then
+			RigFactory.unsit(h)
 			h.Sit = false
 			h.Jump = true -- pops them up out of the bench Seat weld
 			local side = (i % 2 == 0) and 1 or -1 -- alternate which way they round the corner

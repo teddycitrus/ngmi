@@ -10,9 +10,13 @@
 --------------------------------------------------------------------------------
 
 local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
 
 local RigFactory = {}
+
+-- CFrame attribute: a joint's rest Attachment0 frame (or Motor6D C0).
+RigFactory.REST_ATTRIBUTE = "RestFrame"
 
 -- Public default R15 animation assets
 local ANIM = {
@@ -122,6 +126,17 @@ local function getTemplate(look: Looks.Look): Model?
 			built.Parent = nil
 			if root then
 				root.Anchored = wasAnchored :: boolean
+			end
+			-- Each joint's rest frame, kept on the attachment. The shop bodies'
+			-- joint attachments are rotated, so a clone that was posed (RigPose
+			-- folds poses into these attachments) can't get back to rest by
+			-- zeroing them the way a classic R15 could; it reads this instead.
+			for _, d in built:GetDescendants() do
+				if d:IsA("AnimationConstraint") and d.Attachment0 then
+					d.Attachment0:SetAttribute(RigFactory.REST_ATTRIBUTE, d.Attachment0.CFrame)
+				elseif d:IsA("Motor6D") then
+					d:SetAttribute(RigFactory.REST_ATTRIBUTE, d.C0)
+				end
 			end
 		end
 		t = built or false
@@ -300,6 +315,28 @@ function RigFactory.sit(model: Model, hum: Humanoid)
 	RigFactory.playLoop(hum, ANIM.sit)
 end
 
+--- Undo sit(): stop the sit animation. Left playing, it keeps the knees
+--- folded under whatever the rig does next, so a standing NPC wall-sits.
+function RigFactory.unsit(hum: Humanoid)
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		return
+	end
+	for _, track in animator:GetPlayingAnimationTracks() do
+		if track.Animation and track.Animation.AnimationId == ANIM.sit then
+			track:Stop(0.3)
+		end
+	end
+end
+
+-- Client/NPCPosture replaces the stock idle on these rigs (straight legs,
+-- arms hanging at the sides): the stock R15 idles were made for blocky
+-- bodies and hold these narrow realistic ones in a half squat, arms out.
+RigFactory.POSTURE_TAG = "StandPosture"
+-- Model attribute: keep the animation's own arms (for rigs whose arm poses
+-- were authored over the stock idle, like the wall leaners).
+RigFactory.POSTURE_KEEP_ARMS = "PostureKeepArms"
+
 -- Ground speed the default R15 walk covers at playback speed 1. Measured by
 -- pinning a rig and timing the planted foot: it slides back at 15.7-17.4
 -- studs/s. Playing it at speed 1 for an NPC strolling at 6 cycled the legs
@@ -315,6 +352,10 @@ local WALK_NATURAL_SPEED = 16
 --- and over (on clients the NPCs often slid along on the idle animation).
 --- Hysteresis keeps the walk going through those dips.
 function RigFactory.driveLocomotion(hum: Humanoid)
+	local model = hum.Parent
+	if model then
+		CollectionService:AddTag(model, RigFactory.POSTURE_TAG)
+	end
 	local idle = RigFactory.playLoop(hum, ANIM.idle)
 	local walk = loadLoop(hum, ANIM.walk)
 	local moving = false
@@ -371,6 +412,7 @@ function RigFactory.stand(model: Model, hum: Humanoid)
 	if root then
 		root.Anchored = true
 	end
+	CollectionService:AddTag(model, RigFactory.POSTURE_TAG)
 	local idle = RigFactory.playLoop(hum, ANIM.idle)
 	if idle then
 		-- out of step with everyone else, so a hallway doesn't breathe in unison
