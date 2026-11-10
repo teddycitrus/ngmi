@@ -1,41 +1,46 @@
 --!strict
 --------------------------------------------------------------------------------
 -- Rig/Looks.luau
--- What every venue person wears. Every rig is an R15 body from Roblox's
--- generic NeoClassic v2 sets (smooth limbs, real hands) with a generic face,
--- dressed in 3D layered clothing (shirts, jackets, pants, shoes
--- that wrap the body) and mesh hair from the avatar catalog.
+-- What every venue person looks like. Every rig is an R15 rig on a realistic
+-- body from the avatar shop (sculpted head and face, human proportions),
+-- dressed in 3D layered clothing (shirts, jackets, pants, shoes that wrap the
+-- body) and mesh hair from the catalog.
 --
 --   Looks.CROWD   4 everyday outfits the ambient crowd and bodies cycle through
 --   Looks.NAMED   one outfit per named NPC (NPCConfig id), loud enough to pick
 --                 out across a room but still something a person would wear
 --   Looks.describe(look) -> HumanoidDescription
 --
--- Every id was checked against the catalog (AvatarEditorService:SearchCatalog
--- and AssetService:GetBundleDetailsAsync for the shoe pairs).
+-- Every id was checked against the catalog (AvatarEditorService:SearchCatalog,
+-- and AssetService:GetBundleDetailsAsync for the body and shoe bundles).
 --------------------------------------------------------------------------------
 
 local Looks = {}
 
--- Body sets: { torso, leftArm, rightArm, leftLeg, rightLeg }
-local BODY = {
-	man = { 4637290950, 4637157175, 4637286849, 4637285693, 4637289137 }, -- NeoClassic Male v2
-	woman = { 4637151279, 4637119437, 4637120775, 4637120072, 4637122096 }, -- NeoClassic Female v2
-}
-
--- Generic dynamic heads (face included)
-local HEAD = {
-	man = 10725826963,
-	woman = 10725626210,
-}
-
-Looks.SKIN = {
-	Color3.fromRGB(241, 205, 178),
-	Color3.fromRGB(224, 180, 145),
-	Color3.fromRGB(196, 146, 110),
-	Color3.fromRGB(160, 110, 78),
-	Color3.fromRGB(118, 80, 56),
-	Color3.fromRGB(86, 58, 42),
+-- Realistic bodies from the avatar shop: { torso, leftArm, rightArm, leftLeg,
+-- rightLeg } plus the bundle's own head. The faces carry their skin tone in
+-- their texture, so `skin` is matched to each face by eye and paints the
+-- body to agree with it.
+type Person = { parts: { number }, head: number, skin: Color3 }
+local PERSON: { [string]: Person } = {
+	-- Realistic Man (bundle 69789692964194)
+	deshawn = { parts = { 138907177261262, 126046002303149, 118864558463272, 92711794919815, 91754700430259 }, head = 95348374554700, skin = Color3.fromRGB(96, 62, 44) },
+	-- Fashion Model Man (bundle 148843544796522)
+	kenji = { parts = { 136484138279485, 133656943925070, 99161622704680, 108570629440593, 94210819268147 }, head = 138914865792933, skin = Color3.fromRGB(226, 190, 160) },
+	-- Model Man (bundle 261708299650319)
+	luke = { parts = { 137818495202071, 94670898413446, 121780194799365, 116349841260868, 71235686557283 }, head = 108356625707649, skin = Color3.fromRGB(232, 196, 170) },
+	-- January Model Man (bundle 272889456128840)
+	mateo = { parts = { 106062650582720, 93273068870672, 123504742874685, 109637020907933, 108488675090572 }, head = 126811571812177, skin = Color3.fromRGB(188, 138, 102) },
+	-- Realistic Model Woman Doll (bundle 64276026698783)
+	emma = { parts = { 74203867041109, 89294577189357, 85761870061455, 72013766986908, 139331641629327 }, head = 139734314809040, skin = Color3.fromRGB(236, 202, 182) },
+	-- Woman Fashion Model Doll (bundle 181282816119101)
+	mei = { parts = { 122831550366162, 106832235837446, 95246976223366, 124333485905753, 86653892031792 }, head = 76846031172896, skin = Color3.fromRGB(238, 206, 186) },
+	-- January Model Doll (bundle 75057502474636)
+	sofia = { parts = { 71835459452885, 97633279696517, 89067250563417, 88496750791076, 114123828483948 }, head = 87394201185324, skin = Color3.fromRGB(214, 172, 140) },
+	-- Brooklyn Doll (bundle 224122577429494)
+	nia = { parts = { 92278383716524, 132260325803558, 111879510820046, 117428460379794, 117551628750694 }, head = 123932090578829, skin = Color3.fromRGB(140, 94, 64) },
+	-- Candace Bombshell Model Doll (bundle 61735626675336)
+	claire = { parts = { 132575045898664, 100245578215277, 77668477857770, 90161472817698, 100852877018675 }, head = 70787010654497, skin = Color3.fromRGB(240, 212, 196) },
 }
 
 -- Layering slot: lower Order sits closer to the body. Pants go over shoes,
@@ -126,9 +131,7 @@ local GLASSES = 301820310
 
 export type Look = {
 	key: string,
-	body: { number },
-	head: number,
-	skin: Color3,
+	person: Person,
 	hair: { number },
 	face: { number }?,
 	clothes: { Item },
@@ -137,50 +140,49 @@ export type Look = {
 	width: number?,
 }
 
-local function look(key: string, head: number, skin: number, hair: number, clothes: { Item }, shoes: { number }, extra: { [string]: any }?): Look
-	local body = if head == HEAD.woman then BODY.woman else BODY.man
-	local l: any = { key = key, body = body, head = head, skin = Looks.SKIN[skin], hair = { hair }, clothes = clothes, shoes = shoes }
+local function look(key: string, person: Person, hair: number, clothes: { Item }, shoes: { number }, extra: { [string]: any }?): Look
+	local l: any = { key = key, person = person, hair = { hair }, clothes = clothes, shoes = shoes }
 	for k, v in extra or {} do
 		l[k] = v
 	end
 	return l :: Look
 end
 
--- The crowd: four plain hackathon outfits. RigFactory varies the skin tone
--- per rig so the repeats are harder to spot.
+-- The crowd: four plain hackathon outfits, each on its own person.
 Looks.CROWD = {
-	look("crowdA", HEAD.man, 2, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
-	look("crowdB", HEAD.woman, 1, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite),
-	look("crowdC", HEAD.man, 5, HAIR.blackBuzz, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan, { width = 1.04 }),
-	look("crowdD", HEAD.woman, 4, HAIR.blackCurly, { TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey, { height = 0.97 }),
+	look("crowdA", PERSON.kenji, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
+	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite),
+	look("crowdC", PERSON.deshawn, HAIR.blackBuzz, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan),
+	look("crowdD", PERSON.nia, HAIR.blackCurly, { TOP.greyTee, TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey),
 } :: { Look }
 
 -- The named NPCs: each one a colour and cut nobody in the crowd wears.
 Looks.NAMED = {
 	-- salmon blazer on stage, readable from the back row
-	npc_organizer_sarah = look("sarah", HEAD.woman, 2, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack),
+	npc_organizer_sarah = look("sarah", PERSON.emma, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack),
 	-- red ruffle skirt under a pinstripe coat
-	npc_judge_priya = look("priya", HEAD.woman, 4, HAIR.salonBun, { TOP.tieTopWhite, TOP.coatStripe, BOTTOM.ruffleRed }, SHOES.dressBlack, { face = { GLASSES } }),
+	npc_judge_priya = look("priya", PERSON.mei, HAIR.salonBun, { TOP.tieTopWhite, TOP.coatStripe, BOTTOM.ruffleRed }, SHOES.dressBlack, { face = { GLASSES } }),
 	-- white leather jacket, the sponsor money look
-	npc_sponsor_jordan = look("jordan", HEAD.man, 6, HAIR.buzzStache, { TOP.stripeTeeBlack, TOP.leatherWhite, BOTTOM.khaki }, SHOES.dressBrown, { height = 1.06 }),
+	npc_sponsor_jordan = look("jordan", PERSON.deshawn, HAIR.buzzStache, { TOP.stripeTeeBlack, TOP.leatherWhite, BOTTOM.khaki }, SHOES.dressBrown),
 	-- denim over a loud floral shirt
-	npc_mentor_dev = look("dev", HEAD.man, 4, HAIR.curlyTextured, { TOP.floralForest, TOP.denimLight, BOTTOM.beige }, SHOES.canvasGrey, { face = { GLASSES } }),
+	npc_mentor_dev = look("dev", PERSON.mateo, HAIR.curlyTextured, { TOP.floralForest, TOP.denimLight, BOTTOM.beige }, SHOES.canvasGrey, { face = { GLASSES } }),
 	-- volunteer orange, basketball shorts, red runners
-	npc_volunteer_max = look("max", HEAD.man, 3, HAIR.redPart, { TOP.greyTee, TOP.zipOrange, BOTTOM.ballShortsBlue }, SHOES.runRed),
+	npc_volunteer_max = look("max", PERSON.luke, HAIR.redPart, { TOP.greyTee, TOP.zipOrange, BOTTOM.ballShortsBlue }, SHOES.runRed),
 	-- teal hoodie and shades pushed up
-	npc_hacker_alex = look("alex", HEAD.man, 1, HAIR.shadesHair, { TOP.zipTeal, BOTTOM.cargoBlack }, SHOES.highWhite),
+	npc_hacker_alex = look("alex", PERSON.kenji, HAIR.shadesHair, { TOP.stripeTeeBlack, TOP.zipTeal, BOTTOM.cargoBlack }, SHOES.highWhite),
 	-- black leather over red, white leather pants
-	npc_rival_sam = look("sam", HEAD.woman, 5, HAIR.grungePony, { TOP.longSleeveRed, TOP.leatherBlack, BOTTOM.leatherWhite }, SHOES.milBlack),
+	npc_rival_sam = look("sam", PERSON.claire, HAIR.grungePony, { TOP.longSleeveRed, TOP.leatherBlack, BOTTOM.leatherWhite }, SHOES.milBlack),
 	-- all black, the guard
-	npc_security_ron = look("ron", HEAD.man, 5, HAIR.buzz, { TOP.knitBlack, BOTTOM.formalBlack }, SHOES.milBlack, { height = 1.08, width = 1.1 }),
+	npc_security_ron = look("ron", PERSON.mateo, HAIR.buzz, { TOP.knitBlack, BOTTOM.formalBlack }, SHOES.milBlack),
 } :: { [string]: Look }
 
 function Looks.describe(l: Look): HumanoidDescription
 	local d = Instance.new("HumanoidDescription")
-	d.Torso, d.LeftArm, d.RightArm, d.LeftLeg, d.RightLeg = l.body[1], l.body[2], l.body[3], l.body[4], l.body[5]
-	d.Head = l.head
-	d.HeadColor, d.TorsoColor = l.skin, l.skin
-	d.LeftArmColor, d.RightArmColor, d.LeftLegColor, d.RightLegColor = l.skin, l.skin, l.skin, l.skin
+	local p = l.person
+	d.Torso, d.LeftArm, d.RightArm, d.LeftLeg, d.RightLeg = p.parts[1], p.parts[2], p.parts[3], p.parts[4], p.parts[5]
+	d.Head = p.head
+	d.HeadColor, d.TorsoColor = p.skin, p.skin
+	d.LeftArmColor, d.RightArmColor, d.LeftLegColor, d.RightLegColor = p.skin, p.skin, p.skin, p.skin
 	d.HairAccessory = table.concat(l.hair, ",")
 	if l.face then
 		d.FaceAccessory = table.concat(l.face, ",")

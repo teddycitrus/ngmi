@@ -73,10 +73,37 @@ local function buildTemplate(desc: HumanoidDescription, key: string): Model?
 	return nil
 end
 
+-- The shop bodies stand 6.3 to 7.5 studs; the venue (desk chairs, couches,
+-- the seated root offsets in Ambient/Seats and AmbientPopulation) was fitted
+-- to a ~5.4-stud R15. Every look is scaled to that height.
+local TARGET_HEIGHT = 5.4
+
+local function standingHeight(model: Model): number
+	local head = model:FindFirstChild("Head") :: BasePart?
+	local low = math.huge
+	for _, n in { "LeftFoot", "RightFoot" } do
+		local foot = model:FindFirstChild(n) :: BasePart?
+		if foot then
+			low = math.min(low, foot.Position.Y - foot.Size.Y / 2)
+		end
+	end
+	if not head or low == math.huge then
+		return TARGET_HEIGHT
+	end
+	return head.Position.Y + head.Size.Y / 2 - low
+end
+
 local function getTemplate(look: Looks.Look): Model?
 	local t = templates[look.key]
 	if t == nil then
-		t = buildTemplate(Looks.describe(look), look.key) or false
+		local built = buildTemplate(Looks.describe(look), look.key)
+		if built then
+			local h = standingHeight(built)
+			if h > 0 and math.abs(h - TARGET_HEIGHT) > 0.05 then
+				built:ScaleTo(built:GetScale() * TARGET_HEIGHT / h)
+			end
+		end
+		t = built or false
 		templates[look.key] = t
 	end
 	return if t then t else nil
@@ -180,40 +207,10 @@ end
 --- Create an NPC rig. Returns (model, humanoid). The caller positions it with
 --- model:PivotTo(...) and parents it. `id` picks a named NPC's own outfit
 --- (Looks.NAMED, keyed by NPCConfig id); anything else gets one of the
---- crowd's four, in a random skin tone so repeats are harder to spot.
-local SKIN_PARTS_ALL = {
-	"Head",
-	"UpperTorso",
-	"LowerTorso",
-	"LeftUpperArm",
-	"LeftLowerArm",
-	"LeftHand",
-	"RightUpperArm",
-	"RightLowerArm",
-	"RightHand",
-	"LeftUpperLeg",
-	"LeftLowerLeg",
-	"LeftFoot",
-	"RightUpperLeg",
-	"RightLowerLeg",
-	"RightFoot",
-}
+--- crowd's four.
 function RigFactory.create(id: string?): (Model, Humanoid)
-	local named = id and Looks.NAMED[id]
-	if named then
-		return finish(getTemplate(named))
-	end
-	local model, hum = finish(getTemplate(Looks.CROWD[math.random(#Looks.CROWD)]))
-	if model:GetAttribute("Look") then
-		local skin = Looks.SKIN[math.random(#Looks.SKIN)]
-		for _, n in SKIN_PARTS_ALL do
-			local part = model:FindFirstChild(n)
-			if part and part:IsA("BasePart") then
-				part.Color = skin
-			end
-		end
-	end
-	return model, hum
+	local look = (id and Looks.NAMED[id]) or Looks.CROWD[math.random(#Looks.CROWD)]
+	return finish(getTemplate(look))
 end
 
 -- The NGMI base: Roblox's plain default R15 body and head, with no bundle
