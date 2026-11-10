@@ -10,7 +10,7 @@
 -- itself (its thighs, chest, head) or the desk in front of it, and each arm is
 -- solved to reach them through its own joint frames, so a long-armed body and
 -- a short one both land their hands in the same place. The legs are fitted
--- too: thighs level on the seat, shins angled until the feet reach the floor.
+-- too: thighs on the seat, shins down to the floor and clear of its front.
 --
 -- Everything is a plain RigPose.Pose, written with rig:apply(). No animation
 -- may play on a rig posed this way: an animation's joint transforms would
@@ -30,6 +30,9 @@ export type Context = {
 	desk: number?, -- desk top height in root space, for the desk styles
 	deskAt: Vector3?, -- middle of the keys, on their surface, root space
 	mouseAt: Vector3?, -- the mouse or trackpad, on its surface, root space
+	seatTop: number?, -- the cushion's top, root space
+	front: number?, -- Z of the seat's front face (forward is -Z), root space
+	frontTop: number?, -- how high that front face reaches, root space
 }
 
 -- joint key, parent part, child part, in parent-first order
@@ -176,37 +179,94 @@ end
 -- Legs
 --------------------------------------------------------------------------------
 
-local function fitLegs(rig: RigPose.Rig, pose: RigPose.Pose, floor: number?)
+--- The thigh and shin of the right leg at hip pitch `h` and knee `k`, from
+--- the lower torso's frame: the knee and ankle joints, root space.
+local function legChain(rig: RigPose.Rig, hips: CFrame, h: number, k: number): (Vector3, Vector3)
+	local thigh = hips * rig.base.rH * jointAngles("rH", V(h, 0, 3)) * rig.far.rH:Inverse()
+	local kneeAt = thigh * rig.base.rK
+	local shin = kneeAt * jointAngles("rK", V(k, 0, 0)) * rig.far.rK:Inverse()
+	return kneeAt.Position, (shin * rig.base.rA).Position
+end
+
+--- Thighs on the seat, shins down to the floor, clear of the seat's front.
+--- A seat too high tips the thighs down off its edge; one too low (a bean
+--- bag) stretches the legs out; a seat front that reaches past the knees
+--- (a couch base) angles the shins forward rather than through it.
+local function fitLegs(rig: RigPose.Rig, pose: RigPose.Pose, c: Context)
 	pose.rH = V(-90, 0, 3)
 	pose.lH = V(-90, 0, -3)
 	pose.rK = V(90, 0, 0)
 	pose.lK = V(90, 0, 0)
+	local floor = c.floor
 	if not floor then
 		return
 	end
-	-- how high the ankle joint stands off the floor, from the rest pose
 	local rest = SeatPosture.frames(rig, {})
-	local footSize = size(rig.model, "RightFoot", V(0.6, 0.4, 1))
 	local restFoot = rest.RightFoot
-	if not (restFoot and rig.base.rA) then
+	if not (restFoot and rig.base.rA and rig.base.rH and rig.base.rK) then
 		return
 	end
-	local ankleRest = (rest.RightLowerLeg * rig.base.rA).Position.Y
-	local ankleUp = ankleRest - (restFoot.Position.Y - footSize.Y / 2)
-	-- open or close the knees until the ankles sit that high off the floor;
-	-- a seat too high for the legs leaves the feet hanging, as it would
-	local bestK, bestErr = 90, math.huge
-	for k = 55, 100 do
-		pose.rK = V(k, 0, 0)
-		local f = SeatPosture.frames(rig, pose)
-		local ankle = (f.RightLowerLeg * rig.base.rA).Position.Y
-		local err = math.abs(ankle - (floor + ankleUp))
-		if err < bestErr then
-			bestK, bestErr = k, err
+	local footSize = size(rig.model, "RightFoot", V(0.6, 0.4, 1))
+	-- how high the ankle joint stands off the floor, from the rest pose
+	local ankleUp = (rest.RightLowerLeg * rig.base.rA).Position.Y - (restFoot.Position.Y - footSize.Y / 2)
+	local want = floor + ankleUp
+	local shinR = size(rig.model, "RightLowerLeg", V(0.5, 1.4, 0.5)).Z / 2 + 0.04
+	local thighR = size(rig.model, "RightUpperLeg", V(0.6, 1.2, 0.6)).Z / 2
+	local hips = SeatPosture.frames(rig, { root = pose.root, rootPos = pose.rootPos }).LowerTorso
+	if not hips then
+		return
+	end
+	local front, frontTop = c.front, c.frontTop
+	local seatTop = c.seatTop
+
+	local function cost(h: number, k: number): number
+		local knee, ankle = legChain(rig, hips, h, k)
+		local e = ankle.Y - want
+		-- feet through the floor are far worse than feet a little off it
+		local cst = if e < 0 then 40 * e * e else 4 * e * e
+		if front and frontTop then
+			for t = 0, 1, 0.25 do
+				local q = knee:Lerp(ankle, t)
+				if q.Y < frontTop then
+					local over = q.Z + shinR - front
+					if over > 0 then
+						cst += 30 * over * over
+					end
+				end
+			end
+		end
+		-- a thigh tipped down while still over the cushion sinks into it
+		if seatTop and front and h > -90 and knee.Z > front - thighR then
+			local sink = seatTop - (knee.Y - thighR)
+			if sink > 0 then
+				cst += 30 * sink * sink
+			end
+		end
+		return cst + (h + 90) ^ 2 * 1e-4 + (k - 90) ^ 2 * 1.5e-5
+	end
+
+	local bestH, bestK, best = -90, 90, math.huge
+	for h = -90, -63, 3 do
+		for k = 5, 120, 5 do
+			local v = cost(h, k)
+			if v < best then
+				bestH, bestK, best = h, k, v
+			end
 		end
 	end
-	-- then flatten the foot on the floor
+	for h = math.max(-90, bestH - 2), bestH + 2 do
+		for k = bestK - 4, bestK + 4 do
+			local v = cost(h, k)
+			if v < best then
+				bestH, bestK, best = h, k, v
+			end
+		end
+	end
+	pose.rH = V(bestH, 0, 3)
+	pose.lH = V(bestH, 0, -3)
 	pose.rK = V(bestK, 0, 0)
+
+	-- then flatten the foot on the floor
 	local bestA, bestFlat = 0, -math.huge
 	for a = -50, 50, 2 do
 		pose.rA = V(a, 0, 0)
@@ -517,7 +577,7 @@ function SeatPosture.build(rig: RigPose.Rig, style: string, ctx: Context?, body:
 		st = S.lap
 	end
 	local pose: RigPose.Pose = table.clone(body or st.body)
-	fitLegs(rig, pose, c.floor)
+	fitLegs(rig, pose, c)
 
 	local model = rig.model
 	local d: Dims = {

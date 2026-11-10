@@ -332,6 +332,54 @@ export type SeatOptions = {
 -- rebuilding it from these attributes (all root space).
 RigFactory.SEAT_TAG = "SeatIdle"
 
+local FRONT_KEEP = 0.45 -- studs the root stays back from the seat's front edge
+
+--- The forward-most face (root-space Z, forward is -Z) of the furniture the
+--- rig sits on, between the cushion top and 0.8 studs under it, and how
+--- high that face reaches. Parts that do not reach back under the body (a
+--- desk pedestal in front of the chair) are not the seat.
+local function seatFrontOf(model: Model, at: CFrame, opts: SeatOptions, seatTopY: number): (number?, number?)
+	local front, top = nil, nil
+	if opts.seatFront then
+		front = at:PointToObjectSpace(opts.seatFront).Z
+		top = seatTopY
+	end
+	local box = CFrame.new(0, seatTopY - 0.41, -1.2)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local skip: { Instance } = { model }
+	local people = workspace:FindFirstChild("AmbientPeople")
+	if people then
+		table.insert(skip, people)
+	end
+	params.FilterDescendantsInstances = skip
+	for _, part in workspace:GetPartBoundsInBox(at * box, Vector3.new(1.4, 0.78, 2.4), params) do
+		if not part.CanCollide or part.Transparency >= 1 then
+			continue
+		end
+		local cf = at:ToObjectSpace(part.CFrame)
+		local h = part.Size / 2
+		local zmin, zmax, ymax = math.huge, -math.huge, -math.huge
+		for _, sx in { -1, 1 } do
+			for _, sy in { -1, 1 } do
+				for _, sz in { -1, 1 } do
+					local c = (cf * CFrame.new(h.X * sx, h.Y * sy, h.Z * sz)).Position
+					zmin = math.min(zmin, c.Z)
+					zmax = math.max(zmax, c.Z)
+					ymax = math.max(ymax, c.Y)
+				end
+			end
+		end
+		if zmax > -0.3 and zmin > -2.4 then
+			if not front or zmin < front then
+				front = zmin
+			end
+			top = math.max(top or -math.huge, math.min(ymax, seatTopY))
+		end
+	end
+	return front, top
+end
+
 --- Seat an NPC in a posture built for its body (Shared.SeatPosture): no
 --- animation, thighs level on the seat, feet on the floor, hands placed per
 --- `style`. `look` gives the position (X, Z) and facing; the height is solved
@@ -350,13 +398,22 @@ function RigFactory.seatPosed(model: Model, hum: Humanoid, look: CFrame, style: 
 	local rig = RigPose.new(model)
 	local p = look.Position
 	local at = CFrame.new(p.X, opts.seatTop + rig:seatOffset(), p.Z) * look.Rotation
-	-- on a seat deeper than the thighs, sit forward so the knees reach its
-	-- front edge rather than the shins sinking into the cushion
-	if opts.seatFront then
-		local edge = -at:PointToObjectSpace(opts.seatFront).Z
-		local slide = edge - SeatPosture.kneeReach(rig) + 0.12
+	-- The seat's front face under the knees: the cushion edge, or whatever
+	-- reaches further forward below it (a couch base, a seat pan). Sit
+	-- forward until the shins clear it, but no closer than FRONT_KEEP to the
+	-- edge; SeatPosture angles the shins forward for the rest.
+	local seatTopY = opts.seatTop - at.Position.Y
+	local front, frontTop = seatFrontOf(model, at, opts, seatTopY)
+	if front then
+		local shinR = 0.3
+		local shin = model:FindFirstChild("RightLowerLeg")
+		if shin and shin:IsA("BasePart") then
+			shinR = shin.Size.Z / 2
+		end
+		local slide = math.min(-front + shinR + 0.06 - SeatPosture.kneeReach(rig), -front - FRONT_KEEP, 1.2)
 		if slide > 0 then
-			at *= CFrame.new(0, 0, -math.min(slide, 1.2))
+			at *= CFrame.new(0, 0, -slide)
+			front += slide
 		end
 	end
 	local toPivot = if root then root.CFrame:ToObjectSpace(model:GetPivot()) else CFrame.identity
@@ -405,6 +462,9 @@ function RigFactory.seatPosed(model: Model, hum: Humanoid, look: CFrame, style: 
 			end
 		end
 	end
+	ctx.seatTop = seatTopY
+	ctx.front = front
+	ctx.frontTop = frontTop
 	local pose = SeatPosture.build(rig, style, ctx)
 	rig:apply(pose)
 
@@ -413,6 +473,9 @@ function RigFactory.seatPosed(model: Model, hum: Humanoid, look: CFrame, style: 
 	model:SetAttribute("SeatDesk", ctx.desk)
 	model:SetAttribute("SeatKeys", ctx.deskAt)
 	model:SetAttribute("SeatMouse", ctx.mouseAt)
+	model:SetAttribute("SeatTop", ctx.seatTop)
+	model:SetAttribute("SeatFront", ctx.front)
+	model:SetAttribute("SeatFrontTop", ctx.frontTop)
 	CollectionService:AddTag(model, RigFactory.SEAT_TAG)
 	return pose
 end

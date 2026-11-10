@@ -144,11 +144,11 @@ function Work.meeting(parent: Instance, c: Cell, level: number, _ctx: Ctx)
 	local farZ, inDir = farSide(c)
 	local wood = Color3.fromRGB(112, 78, 52)
 	local L, W = 20, 6
-	local top = y + 3.25
+	local top = y + 2.75 -- Office.DESK_TOP, for the 1.72 chairs
 	Kit.part(parent, "ConfTable", V(L - W, 0.3, W), V(cx, top - 0.15, cz), wood, M.Wood)
 	for _, sx in { -1, 1 } do
 		Kit.cylY(parent, "ConfTableEnd", 0.3, W, V(cx + sx * (L - W) / 2, top - 0.15, cz), wood, M.Wood)
-		Kit.part(parent, "Pedestal", V(1.4, 2.9, 2.6), V(cx + sx * 5, y + 1.5, cz), Color3.fromRGB(40, 42, 48), M.Metal)
+		Kit.part(parent, "Pedestal", V(1.4, 2.4, 2.6), V(cx + sx * 5, y + 1.25, cz), Color3.fromRGB(40, 42, 48), M.Metal)
 	end
 	local hub = Kit.trim(parent, "CableHub", V(1.8, 0.06, 0.8), V(cx, top + 0.03, cz), Color3.fromRGB(40, 42, 48), M.Metal)
 	hub.CastShadow = false

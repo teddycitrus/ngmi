@@ -49,19 +49,42 @@ local STYLES: { { string | number } } = {
 	{ "talking", 14 },
 }
 
-local function pickStyle(): string
+-- At a table (the conference room): forearms on it, chin on a hand.
+local TABLE_STYLES: { { string | number } } = {
+	{ "deskRest", 34 },
+	{ "chin", 22 },
+	{ "crossed", 26 },
+	{ "lap", 18 },
+}
+
+local function pickStyle(list: { { string | number } }): string
 	local total = 0
-	for _, e in STYLES do
+	for _, e in list do
 		total += e[2] :: number
 	end
 	local r = math.random() * total
-	for _, e in STYLES do
+	for _, e in list do
 		r -= e[2] :: number
 		if r <= 0 then
 			return e[1] :: string
 		end
 	end
-	return STYLES[1][1] :: string
+	return list[1][1] :: string
+end
+
+--- A table top in front of the seat, at working height above it, if any.
+local function tableAhead(pos: Vector3, face: Vector3, seatTop: number, model: Instance): BasePart?
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { model }
+	local hit = workspace:Raycast(pos + face * 1.9 + V(0, 3, 0), V(0, -5, 0), params)
+	if hit and hit.Instance:IsA("BasePart") then
+		local rise = hit.Position.Y - seatTop
+		if rise > 0.6 and rise < 1.6 then
+			return hit.Instance
+		end
+	end
+	return nil
 end
 
 local Seats = {}
@@ -147,13 +170,17 @@ local function spawnSitter(spot: Spot, folder: Instance): Model
 	model.Parent = folder
 
 	local seat = spot.seat
-	local style = pickStyle()
+	local seatTop = seat.Position.Y + seat.Size.Y / 2
+	local furniture = seat:FindFirstAncestorOfClass("Model") or seat
+	local tableTop = tableAhead(pos, face, seatTop, furniture)
+	local style = pickStyle(if tableTop then TABLE_STYLES else STYLES)
 	-- the spot sits along the seat; its front edge is the seat's
 	local frontDist = seat.CFrame:PointToObjectSpace(pos).Z + seat.Size.Z / 2
 	RigFactory.seatPosed(model, hum, CFrame.lookAt(pos, pos + face), style, {
-		seatTop = seat.Position.Y + seat.Size.Y / 2,
+		seatTop = seatTop,
 		seatFront = pos + face * frontDist,
-		ignore = { seat:FindFirstAncestorOfClass("Model") or seat },
+		ignore = { furniture },
+		desk = tableTop,
 	})
 	if style == "phone" then
 		task.defer(Seats.givePhone, model)

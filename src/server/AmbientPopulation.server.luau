@@ -119,6 +119,7 @@ local function spawnSeated(seat: Part)
 	-- it takes the station's orientation unrotated.
 	local station = seat.Parent
 	local keysAt: Vector3?, mouseAt: Vector3? = nil, nil
+	local laptop: Model? = nil
 	local deskPart = station and station:FindFirstChild("Desk")
 	if station and station:IsA("Model") and station.PrimaryPart and deskPart and deskPart:IsA("BasePart") then
 		local deskTop = deskPart.Position.Y + deskPart.Size.Y / 2 - station:GetPivot().Position.Y
@@ -129,7 +130,7 @@ local function spawnSeated(seat: Part)
 			end
 			local lap = AssetLibrary.clone("Laptop", station:GetPivot() * CFrame.new(0, deskTop + 0.09, -0.1))
 			if lap then
-				lap.Parent = model -- cleared with the rig on Night 2
+				laptop = lap
 				local deck = lap:FindFirstChild("KeyDeck")
 				local pad = lap:FindFirstChild("Trackpad")
 				if deck and deck:IsA("BasePart") then
@@ -169,6 +170,11 @@ local function spawnSeated(seat: Part)
 		keysAt = keysAt,
 		mouseAt = mouseAt,
 	})
+	-- only now: parented while the rig was being placed, it would have moved
+	-- with it, off the desk
+	if laptop then
+		laptop.Parent = model -- cleared with the rig on Night 2
+	end
 
 	-- Glance up from the screen at whoever walks past (anyone not asleep
 	-- face-down on the desk).

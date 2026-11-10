@@ -61,6 +61,9 @@ local function contextOf(model: Model): SeatPosture.Context
 		desk = model:GetAttribute("SeatDesk") :: number?,
 		deskAt = model:GetAttribute("SeatKeys") :: Vector3?,
 		mouseAt = model:GetAttribute("SeatMouse") :: Vector3?,
+		seatTop = model:GetAttribute("SeatTop") :: number?,
+		front = model:GetAttribute("SeatFront") :: number?,
+		frontTop = model:GetAttribute("SeatFrontTop") :: number?,
 	}
 end
 
