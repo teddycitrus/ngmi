@@ -20,6 +20,7 @@
 --------------------------------------------------------------------------------
 
 local RigPose = require(script.Parent.RigPose)
+local SeatPosture = require(script.Parent.SeatPosture)
 
 type Pose = RigPose.Pose
 type Clip = RigPose.Clip
@@ -207,6 +208,7 @@ export type Member = {
 	chatSeed: number?, -- shared by both halves of a pair, so they take turns
 	chatLead: boolean?, -- which half of the pair speaks first
 	clapShut: number?, -- shoulder roll that brings this body's palms together (fitClap)
+	arms: Pose?, -- resting arms solved for this body: hands on the lap or the phone (fitSeat)
 }
 
 local SEAT_BASE: Pose = {
@@ -229,6 +231,23 @@ local CLAP_SHUT = -47
 local CLAP_SWING = 17
 local CLAP_SHOULDER = 50
 local CLAP_ELBOW = -60
+
+local ARM_KEYS = { "rS", "lS", "rE", "lE", "rW", "lW" }
+
+--- Solve where this actor's hands rest (on the thighs, or holding a phone)
+--- for its own arm lengths, into m.arms.
+function SpeakerChoreo.fitSeat(rig: RigPose.Rig, m: Member)
+	local body: Pose = { waist = V(4 + 10 * m.lean, 0, 0), neck = V(if m.phone then 34 else -2, 0, 0) }
+	local ok, pose = pcall(SeatPosture.build, rig, if m.phone then "phone" else "lap", nil, body)
+	if not ok then
+		return
+	end
+	local arms: Pose = {}
+	for _, key in ARM_KEYS do
+		arms[key] = pose[key]
+	end
+	m.arms = arms
+end
 
 local function clapArms(z: number): Pose
 	return {
@@ -281,6 +300,9 @@ local function clapping(p: Pose, t: number, m: Member): Pose
 	for key, v in clapArms(z) do
 		out[key] = v
 	end
+	-- the claps were fitted with straight wrists
+	out.rW = nil
+	out.lW = nil
 	out.neck = (p.neck or Vector3.zero) * V(0.3, 0.3, 0.3) + V(-4, 0, 0)
 	return out
 end
@@ -393,7 +415,14 @@ function SpeakerChoreo.idle(t: number, m: Member): Pose
 	local glance = math.max(0, noise(s, 9, t * 0.18) - 0.35) * 2.2 -- occasional
 	local glanceSide = if noise(s, 10, t * 0.05) > 0 then 1 else -1
 
-	local p: Pose = add(SEAT_BASE, {
+	local seat = SEAT_BASE
+	if m.arms then
+		seat = table.clone(SEAT_BASE)
+		for key, v in m.arms do
+			seat[key] = v
+		end
+	end
+	local p: Pose = add(seat, {
 		waist = V(4 + 10 * m.lean + 1.2 * breath, 0, 0),
 		neck = V(
 			(if m.phone then 34 else -2) + 3 * noise(s, 11, t * 0.4),
@@ -401,7 +430,7 @@ function SpeakerChoreo.idle(t: number, m: Member): Pose
 			3 * noise(s, 13, t * 0.25)
 		),
 	})
-	if m.phone then
+	if m.phone and not m.arms then
 		p = add(p, { rS = V(-6, 0, 2), lS = V(-6, 0, -2), rE = V(-42, 0, 0), lE = V(-42, 0, 0) })
 	end
 	-- hands drift a little on the lap, so nobody sits frozen
@@ -419,6 +448,7 @@ function SpeakerChoreo.wave(p: Pose, t: number, seed: number, w: number): Pose
 	local up = table.clone(p)
 	up.rS = V(150, 0, 14 + 22 * s)
 	up.rE = V(-30, 0, 0)
+	up.rW = nil
 	up.neck = (p.neck or Vector3.zero) + V(-6, 0, 0)
 	return RigPose.blend(p, up, w)
 end

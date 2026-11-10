@@ -11,7 +11,11 @@
 
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+
+local RigPose = require(ReplicatedStorage.Shared.RigPose)
+local SeatPosture = require(ReplicatedStorage.Shared.SeatPosture)
 
 local RigFactory = {}
 
@@ -313,6 +317,104 @@ function RigFactory.sit(model: Model, hum: Humanoid)
 		root.Anchored = true
 	end
 	RigFactory.playLoop(hum, ANIM.sit)
+end
+
+export type SeatOptions = {
+	seatTop: number, -- world Y of the seat's top face
+	seatFront: Vector3?, -- a point on the seat's front edge: deep seats slide the sitter up to it
+	ignore: { Instance }?, -- skipped when finding the floor (the chair itself)
+	desk: Instance?, -- furniture to find a desk top in, for the desk styles
+	keysAt: Vector3?, -- middle of the keyboard's keys, on their surface, world space
+	mouseAt: Vector3?, -- the mouse or trackpad, on its surface, world space
+}
+
+-- Client/SeatIdle animates rigs with this tag on top of their seated pose,
+-- rebuilding it from these attributes (all root space).
+RigFactory.SEAT_TAG = "SeatIdle"
+
+--- Seat an NPC in a posture built for its body (Shared.SeatPosture): no
+--- animation, thighs level on the seat, feet on the floor, hands placed per
+--- `style`. `look` gives the position (X, Z) and facing; the height is solved
+--- from the seat top. Returns the pose written.
+function RigFactory.seatPosed(model: Model, hum: Humanoid, look: CFrame, style: string, opts: SeatOptions): RigPose.Pose
+	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if root then
+		root.Anchored = true
+	end
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, t in animator:GetPlayingAnimationTracks() do
+			t:Stop(0)
+		end
+	end
+	local rig = RigPose.new(model)
+	local p = look.Position
+	local at = CFrame.new(p.X, opts.seatTop + rig:seatOffset(), p.Z) * look.Rotation
+	-- on a seat deeper than the thighs, sit forward so the knees reach its
+	-- front edge rather than the shins sinking into the cushion
+	if opts.seatFront then
+		local edge = -at:PointToObjectSpace(opts.seatFront).Z
+		local slide = edge - SeatPosture.kneeReach(rig) + 0.12
+		if slide > 0 then
+			at *= CFrame.new(0, 0, -math.min(slide, 1.2))
+		end
+	end
+	local toPivot = if root then root.CFrame:ToObjectSpace(model:GetPivot()) else CFrame.identity
+	model:PivotTo(at * toPivot)
+
+	local exclude = RaycastParams.new()
+	exclude.FilterType = Enum.RaycastFilterType.Exclude
+	local skip: { Instance } = { model }
+	for _, i in opts.ignore or {} do
+		table.insert(skip, i)
+	end
+	local people = workspace:FindFirstChild("AmbientPeople")
+	if people then
+		table.insert(skip, people)
+	end
+	exclude.FilterDescendantsInstances = skip
+	local ctx: SeatPosture.Context = {}
+	-- the floor under the feet: skip anything standing well above it (a
+	-- coffee table in front of the couch)
+	local origin = at * Vector3.new(0, 0, -1.4)
+	for _ = 1, 4 do
+		local hit = workspace:Raycast(origin, Vector3.new(0, -8, 0), exclude)
+		if not hit then
+			break
+		end
+		if hit.Position.Y < opts.seatTop - 0.9 then
+			ctx.floor = hit.Position.Y - at.Position.Y
+			break
+		end
+		table.insert(skip, hit.Instance)
+		exclude.FilterDescendantsInstances = skip
+	end
+	if opts.desk then
+		local only = RaycastParams.new()
+		only.FilterType = Enum.RaycastFilterType.Include
+		only.FilterDescendantsInstances = { opts.desk }
+		local hit = workspace:Raycast(at * Vector3.new(0, 3, -1.9), Vector3.new(0, -5, 0), only)
+		local top = hit and hit.Position.Y - at.Position.Y
+		if top and top > -0.5 and top < 2.5 then
+			ctx.desk = top
+			if opts.keysAt then
+				ctx.deskAt = at:PointToObjectSpace(opts.keysAt)
+			end
+			if opts.mouseAt then
+				ctx.mouseAt = at:PointToObjectSpace(opts.mouseAt)
+			end
+		end
+	end
+	local pose = SeatPosture.build(rig, style, ctx)
+	rig:apply(pose)
+
+	model:SetAttribute("SeatStyle", style)
+	model:SetAttribute("SeatFloor", ctx.floor)
+	model:SetAttribute("SeatDesk", ctx.desk)
+	model:SetAttribute("SeatKeys", ctx.deskAt)
+	model:SetAttribute("SeatMouse", ctx.mouseAt)
+	CollectionService:AddTag(model, RigFactory.SEAT_TAG)
+	return pose
 end
 
 --- Undo sit(): stop the sit animation. Left playing, it keeps the knees

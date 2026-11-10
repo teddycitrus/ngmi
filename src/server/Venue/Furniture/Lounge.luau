@@ -20,28 +20,28 @@ local LEAF = { Color3.fromRGB(58, 110, 56), Color3.fromRGB(74, 128, 62), Color3.
 --------------------------------------------------------------------------------
 -- Couch
 -- Contract: two Seats, "CushionL" and "CushionR", unrotated (their LookVector
--- is the couch's facing), centred at Y 1.75 and 0.5 thick. AmbientPopulation
--- sits sleepers 0.85 above the cushion centre.
+-- is the couch's facing), centred at Y 1.45 and 0.5 thick: a 1.7 seat, an
+-- adult's knee height.
 --------------------------------------------------------------------------------
 local function couch(): Model
 	local m = Kit.model("Couch")
 	local body = Color3.fromRGB(66, 76, 100)
 	local cushion = Color3.fromRGB(84, 95, 122)
-	Kit.part(m, "Base", V(7.9, 0.9, 3.36), CF(0, 0.85, 0), body, M.Fabric)
+	Kit.part(m, "Base", V(7.9, 0.8, 3.36), CF(0, 0.8, 0), body, M.Fabric)
 	for _, sx in { -1, 1 } do
 		for _, sz in { -1, 1 } do
 			Kit.trim(m, "Foot", V(0.3, 0.42, 0.3), CF(sx * 3.6, 0.21, sz * 1.4), WALNUT, M.Wood)
 		end
-		Kit.part(m, "Arm", V(0.8, 1.25, 3.4), CF(sx * 3.6, 1.62, 0), body, M.Fabric)
-		Kit.cylZ(m, "ArmRoll", 3.4, 0.82, CF(sx * 3.6, 2.24, 0), body, M.Fabric, { collide = false })
+		Kit.part(m, "Arm", V(0.8, 1.25, 3.4), CF(sx * 3.6, 1.32, 0), body, M.Fabric)
+		Kit.cylZ(m, "ArmRoll", 3.4, 0.82, CF(sx * 3.6, 1.94, 0), body, M.Fabric, { collide = false })
 	end
-	Kit.part(m, "Back", V(6.4, 2.2, 0.7), CF(0, 2.2, 1.31), body, M.Fabric)
+	Kit.part(m, "Back", V(6.4, 2.2, 0.7), CF(0, 2.0, 1.31), body, M.Fabric)
 	for _, sx in { -1, 1 } do
-		Kit.trim(m, "BackCushion", V(3.15, 1.75, 0.6), CF(sx * 1.6, 2.75, 0.82) * CFrame.Angles(math.rad(10), 0, 0), cushion, M.Fabric)
+		Kit.trim(m, "BackCushion", V(3.15, 1.75, 0.6), CF(sx * 1.6, 2.45, 0.82) * CFrame.Angles(math.rad(10), 0, 0), cushion, M.Fabric)
 	end
-	Kit.seat(m, "CushionL", V(3.4, 0.5, 2.8), CF(-1.8, 1.75, -0.1), cushion, M.Fabric)
-	Kit.seat(m, "CushionR", V(3.4, 0.5, 2.8), CF(1.8, 1.75, -0.1), cushion, M.Fabric)
-	Kit.blob(m, "Pillow", V(1.3, 1.1, 0.45), CF(-2.75, 2.5, 0.45) * CFrame.Angles(math.rad(15), math.rad(20), math.rad(10)), Color3.fromRGB(204, 150, 60), M.Fabric, { collide = false })
+	Kit.seat(m, "CushionL", V(3.4, 0.5, 2.8), CF(-1.8, 1.45, -0.1), cushion, M.Fabric)
+	Kit.seat(m, "CushionR", V(3.4, 0.5, 2.8), CF(1.8, 1.45, -0.1), cushion, M.Fabric)
+	Kit.blob(m, "Pillow", V(1.3, 1.1, 0.45), CF(-2.75, 2.2, 0.45) * CFrame.Angles(math.rad(15), math.rad(20), math.rad(10)), Color3.fromRGB(204, 150, 60), M.Fabric, { collide = false })
 	return m
 end
 
@@ -57,7 +57,7 @@ local function armchair(): Model
 		Kit.cylZ(m, "ArmRoll", 3.2, 0.62, CF(sx * 1.6, 2.2, 0), body, M.Leather, { collide = false })
 	end
 	Kit.part(m, "Back", V(2.6, 2.4, 0.6), CF(0, 2.3, 1.3) * CFrame.Angles(math.rad(8), 0, 0), body, M.Leather)
-	Kit.seat(m, "Cushion", V(2.6, 0.5, 2.6), CF(0, 1.55, -0.15), body:Lerp(Color3.new(1, 1, 1), 0.06), M.Leather)
+	Kit.seat(m, "Cushion", V(2.6, 0.5, 2.6), CF(0, 1.47, -0.15), body:Lerp(Color3.new(1, 1, 1), 0.06), M.Leather)
 	return m
 end
 

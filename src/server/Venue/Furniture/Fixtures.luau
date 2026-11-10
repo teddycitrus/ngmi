@@ -188,16 +188,16 @@ end
 local function bench(): Model
 	local m = Kit.model("Bench")
 	local wood = Color3.fromRGB(150, 108, 66)
-	local seat = Kit.seat(m, "Seat", V(5.6, 0.3, 1.4), CF(0, 1.74, -0.1), wood, M.Wood)
+	local seat = Kit.seat(m, "Seat", V(5.6, 0.3, 1.4), CF(0, 1.58, -0.1), wood, M.Wood)
 	seat.Transparency = 1
 	for i = -1, 1 do
-		Kit.trim(m, "Slat", V(6, 0.16, 0.42), CF(0, 1.81, -0.1 + i * 0.48), wood, M.Wood)
+		Kit.trim(m, "Slat", V(6, 0.16, 0.42), CF(0, 1.65, -0.1 + i * 0.48), wood, M.Wood)
 	end
 	for _, sx in { -1, 1 } do
-		Kit.trim(m, "Frame", V(0.2, 1.7, 1.5), CF(sx * 2.6, 0.85, -0.05), DARK, M.Metal)
-		Kit.trim(m, "BackPost", V(0.2, 1.6, 0.2), CF(sx * 2.6, 2.5, 0.65) * CFrame.Angles(math.rad(10), 0, 0), DARK, M.Metal)
+		Kit.trim(m, "Frame", V(0.2, 1.54, 1.5), CF(sx * 2.6, 0.77, -0.05), DARK, M.Metal)
+		Kit.trim(m, "BackPost", V(0.2, 1.6, 0.2), CF(sx * 2.6, 2.34, 0.65) * CFrame.Angles(math.rad(10), 0, 0), DARK, M.Metal)
 	end
-	for _, y in { 2.45, 3.0 } do
+	for _, y in { 2.29, 2.84 } do
 		Kit.trim(m, "BackSlat", V(6, 0.36, 0.14), CF(0, y, 0.72) * CFrame.Angles(math.rad(10), 0, 0), wood, M.Wood)
 	end
 	return m

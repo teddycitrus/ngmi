@@ -55,20 +55,31 @@ local bagSleeperCount = 0
 -- forward, elbows X- flex)
 --------------------------------------------------------------------------------
 
-local DESK_POSES: { RigPose.Pose } = {
-	-- typing: forearms out to the keyboard, eyes on the screen
-	{ neck = V(12, 0, 0), rS = V(42, 0, -6), lS = V(42, 0, 6), rE = V(-58, 0, 0), lE = V(-58, 0, 0) },
-	{ neck = V(12, 0, 0), rS = V(42, 0, -6), lS = V(42, 0, 6), rE = V(-58, 0, 0), lE = V(-58, 0, 0) },
-	{ waist = V(8, 0, 0), neck = V(16, 0, 0), rS = V(46, 0, -8), lS = V(46, 0, 8), rE = V(-52, 0, 0), lE = V(-52, 0, 0) },
-	-- passed out on the desk, arms folded under the head
-	{ waist = V(44, 0, 0), neck = V(26, 0, 0), rS = V(78, 0, -10), lS = V(78, 0, 10), rE = V(-96, 0, 0), lE = V(-96, 0, 0) },
-	-- leaned back, staring at the ceiling
-	{ waist = V(-14, 0, 0), neck = V(-12, 0, 0), rS = V(12, 0, 4), lS = V(12, 0, -4) },
-	-- chin propped on one hand
-	{ waist = V(16, 0, 0), neck = V(8, 0, 9), rS = V(70, 0, -14), rE = V(-118, 0, 0), lS = V(38, 0, 6), lE = V(-60, 0, 0) },
-	-- head in both hands
-	{ waist = V(24, 0, 0), neck = V(22, 0, 0), rS = V(76, 0, -18), lS = V(76, 0, 18), rE = V(-122, 0, 0), lE = V(-122, 0, 0) },
+-- What a desk worker is doing, weighted. Each is a SeatPosture style, solved
+-- for the person's own body against the real desk, keyboard and mouse.
+local DESK_STYLES: { { string | number } } = {
+	{ "typing", 58 },
+	{ "deskRest", 10 },
+	{ "chin", 11 },
+	{ "crossed", 7 },
+	{ "headHands", 6 },
+	{ "asleep", 8 },
 }
+
+local function pickStyle(list: { { string | number } }): string
+	local total = 0
+	for _, e in list do
+		total += e[2] :: number
+	end
+	local r = math.random() * total
+	for _, e in list do
+		r -= e[2] :: number
+		if r <= 0 then
+			return e[1] :: string
+		end
+	end
+	return list[1][1] :: string
+end
 
 local LEAN_POSES: { RigPose.Pose } = {
 	-- scrolling a phone held at the chest
@@ -98,36 +109,71 @@ local function spawnSeated(seat: Part)
 
 	local model, hum = RigFactory.create()
 	RigFactory.applyHair(model, math.random(0, 999999))
-	-- Sit on the chair facing the desk
 	model:PivotTo(CFrame.lookAt(pos + V(0, 2.6, 0), pos + V(0, 2.6, faceZ)))
 	model.Parent = folder
-	RigFactory.sit(model, hum)
-	local deskPose = DESK_POSES[math.random(#DESK_POSES)]
-	pose(model, deskPose)
-
-	-- Glance up from the screen at whoever walks past (anyone not passed out
-	-- face-down on the desk). Foot IK is for rigs that actually walk.
-	local slumped = deskPose.waist ~= nil and deskPose.waist.X >= 40
-	if not slumped then
-		RigFactory.enableHeadTracking(model, hum)
-	end
 
 	-- Most coders work off a laptop: hide the workstation's monitor and set a
 	-- laptop on the desk in front of them. The station is the seat's parent
 	-- model, so the laptop goes in its local space and inherits its rotation.
 	-- The template's user side is +Z, the same side as the station's chair, so
-	-- it takes the station's orientation unrotated. (It used to be spun 180
-	-- degrees, which turned every screen away from its user.)
+	-- it takes the station's orientation unrotated.
 	local station = seat.Parent
-	if math.random() < 0.85 and station and station:IsA("Model") and station.PrimaryPart then
+	local keysAt: Vector3?, mouseAt: Vector3? = nil, nil
+	local deskPart = station and station:FindFirstChild("Desk")
+	if station and station:IsA("Model") and station.PrimaryPart and deskPart and deskPart:IsA("BasePart") then
+		local deskTop = deskPart.Position.Y + deskPart.Size.Y / 2 - station:GetPivot().Position.Y
 		local monitor = station:FindFirstChild("Monitor")
-		if monitor then
-			monitor:Destroy()
+		if math.random() < 0.85 then
+			if monitor then
+				monitor:Destroy()
+			end
+			local lap = AssetLibrary.clone("Laptop", station:GetPivot() * CFrame.new(0, deskTop + 0.09, -0.1))
+			if lap then
+				lap.Parent = model -- cleared with the rig on Night 2
+				local deck = lap:FindFirstChild("KeyDeck")
+				local pad = lap:FindFirstChild("Trackpad")
+				if deck and deck:IsA("BasePart") then
+					keysAt = deck.Position + V(0, deck.Size.Y / 2, 0)
+				end
+				if pad and pad:IsA("BasePart") then
+					mouseAt = pad.Position + V(0, pad.Size.Y / 2, 0)
+				end
+			end
+		elseif monitor then
+			local kb = monitor:FindFirstChild("Keyboard")
+			local mouse = monitor:FindFirstChild("Mouse")
+			if kb and kb:IsA("BasePart") then
+				keysAt = kb.Position + V(0, kb.Size.Y / 2, 0)
+			end
+			if mouse and mouse:IsA("BasePart") then
+				mouseAt = mouse.Position + V(0, mouse.Size.Y / 2, 0)
+			end
 		end
-		local lap = AssetLibrary.clone("Laptop", station:GetPivot() * CFrame.new(0, 3.35, -0.1))
-		if lap then
-			lap.Parent = model -- cleared with the rig on Night 2
-		end
+	end
+
+	-- Sit on the chair facing the desk, on its real cushion.
+	local cushion = station and station:FindFirstChild("ChairSeat", true)
+	local seatTop = pos.Y + 1.72
+	local seatPos = pos
+	if cushion and cushion:IsA("BasePart") then
+		seatTop = cushion.Position.Y + cushion.Size.Y / 2
+		seatPos = cushion.Position
+	end
+	local style = pickStyle(DESK_STYLES)
+	local face = V(0, 0, faceZ)
+	RigFactory.seatPosed(model, hum, CFrame.lookAt(seatPos, seatPos + face), style, {
+		seatTop = seatTop,
+		seatFront = if cushion and cushion:IsA("BasePart") then cushion.Position + face * (cushion.Size.Z / 2) else nil,
+		ignore = { station :: Instance },
+		desk = station,
+		keysAt = keysAt,
+		mouseAt = mouseAt,
+	})
+
+	-- Glance up from the screen at whoever walks past (anyone not asleep
+	-- face-down on the desk).
+	if style ~= "asleep" then
+		RigFactory.enableHeadTracking(model, hum)
 	end
 
 	table.insert(spawned, model)
@@ -263,21 +309,20 @@ local function spawnCouchSleeper(seat: Part)
 	end
 	face = face.Unit
 
-	-- Cushion top sits ~0.85 below where a seated rig's root wants to be.
-	local sitPos = seat.Position + V(0, 0.85, 0)
 	local model, hum = RigFactory.create()
 	RigFactory.applyHair(model, math.random(0, 999999))
-	model:PivotTo(CFrame.lookAt(sitPos, sitPos + face))
 	-- Anchor BEFORE parenting so the cushion Seat doesn't auto-weld the rig.
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.Anchored = true
 	end
+	model:PivotTo(CFrame.lookAt(seat.Position + V(0, 3, 0), seat.Position + V(0, 3, 0) + face))
 	model.Parent = folder
-	RigFactory.sit(model, hum)
-
-	local lean = if math.random() < 0.5 then 1 else -1
-	pose(model, { waist = V(-6, 0, 12 * lean), neck = V(-16, 0, 22 * lean), rS = V(8, 0, 6), lS = V(8, 0, -6) })
+	RigFactory.seatPosed(model, hum, CFrame.lookAt(seat.Position, seat.Position + face), "dozing", {
+		seatTop = seat.Position.Y + seat.Size.Y / 2,
+		seatFront = seat.Position + face * (seat.Size.Z / 2),
+		ignore = { seat:FindFirstAncestorOfClass("Model") or seat },
+	})
 	table.insert(spawned, model)
 end
 

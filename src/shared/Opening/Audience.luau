@@ -94,6 +94,7 @@ function Audience.buildAudience(parent: Instance, aud: { [string]: number }, cx:
 					keen = math.random(),
 				}
 				SpeakerChoreo.fitClap(actor.rig, member)
+				SpeakerChoreo.fitSeat(actor.rig, member)
 				table.insert(extras, {
 					actor = actor,
 					pos = slot.pos,
@@ -168,6 +169,7 @@ function Audience.standIns(parent: Instance, ids: { string }): ({ Extra }, () ->
 			member = { seed = math.random() * 100, lean = math.random() * 0.6 - 0.3, phone = false, keen = 1 },
 		})
 		SpeakerChoreo.fitClap(actor.rig, out[#out].member)
+		SpeakerChoreo.fitSeat(actor.rig, out[#out].member)
 		for _, d in npc:GetDescendants() do
 			if d:IsA("BasePart") then
 				hidden[d] = d.LocalTransparencyModifier

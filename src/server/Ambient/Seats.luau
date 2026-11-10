@@ -18,7 +18,6 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
-local RigPose = require(ReplicatedStorage.Shared.RigPose)
 local RigFactory = require(script.Parent.Parent.RigFactory)
 
 local V = Vector3.new
@@ -40,20 +39,30 @@ local SPOTS: { [string]: { [string]: { number } } } = {
 	OfficeChair = { Seat = { 0 } },
 }
 
--- Relaxed seated postures (RigPose conventions: waist/neck X+ forward,
--- shoulders X+ raise forward, elbows X- flex).
-local POSES: { RigPose.Pose } = {
-	-- scrolling a phone held low in both hands
-	{ neck = V(28, 0, 0), rS = V(34, 0, -10), lS = V(34, 0, 10), rE = V(-92, 0, 0), lE = V(-92, 0, 0) },
-	-- arms folded, leaning back
-	{ waist = V(-8, 0, 0), rS = V(26, 0, -30), lS = V(26, 0, 30), rE = V(-112, 0, 0), lE = V(-112, 0, 0) },
-	-- elbows on knees, hunched forward
-	{ waist = V(26, 0, 0), neck = V(-10, 0, 0), rS = V(48, 0, -6), lS = V(48, 0, 6), rE = V(-70, 0, 0), lE = V(-70, 0, 0) },
-	-- slumped back, head tipped up
-	{ waist = V(-16, 0, 0), neck = V(-18, 0, 0), rS = V(8, 0, 8), lS = V(8, 0, -8) },
-	-- mid-conversation, one hand gesturing
-	{ neck = V(4, 0, 12), rS = V(40, 0, -20), rE = V(-80, 0, 0), lS = V(10, 0, 6), lE = V(-30, 0, 0) },
+-- Relaxed seated postures (Shared.SeatPosture styles, solved per body), weighted.
+local STYLES: { { string | number } } = {
+	{ "phone", 26 },
+	{ "lap", 18 },
+	{ "clasped", 14 },
+	{ "crossed", 16 },
+	{ "knees", 12 },
+	{ "talking", 14 },
 }
+
+local function pickStyle(): string
+	local total = 0
+	for _, e in STYLES do
+		total += e[2] :: number
+	end
+	local r = math.random() * total
+	for _, e in STYLES do
+		r -= e[2] :: number
+		if r <= 0 then
+			return e[1] :: string
+		end
+	end
+	return STYLES[1][1] :: string
+end
 
 local Seats = {}
 
@@ -126,8 +135,9 @@ local function spawnSitter(spot: Spot, folder: Instance): Model
 	-- Face the seat's front, upright, regardless of any tilt in the furniture.
 	local look = spot.seat.CFrame.LookVector
 	local flat = V(look.X, 0, look.Z)
+	local face = if flat.Magnitude > 0.01 then flat.Unit else V(0, 0, -1)
 	local pos = spot.cf.Position
-	model:PivotTo(CFrame.lookAt(pos, pos + (if flat.Magnitude > 0.01 then flat.Unit else V(0, 0, -1))))
+	model:PivotTo(CFrame.lookAt(pos, pos + face))
 	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if root then
 		root.Anchored = true
@@ -135,11 +145,17 @@ local function spawnSitter(spot: Spot, folder: Instance): Model
 	hum.EvaluateStateMachine = false
 	spot.seat.Disabled = true
 	model.Parent = folder
-	RigFactory.sit(model, hum)
 
-	local which = math.random(#POSES)
-	RigPose.new(model):rebase(POSES[which])
-	if which == 1 then
+	local seat = spot.seat
+	local style = pickStyle()
+	-- the spot sits along the seat; its front edge is the seat's
+	local frontDist = seat.CFrame:PointToObjectSpace(pos).Z + seat.Size.Z / 2
+	RigFactory.seatPosed(model, hum, CFrame.lookAt(pos, pos + face), style, {
+		seatTop = seat.Position.Y + seat.Size.Y / 2,
+		seatFront = pos + face * frontDist,
+		ignore = { seat:FindFirstAncestorOfClass("Model") or seat },
+	})
+	if style == "phone" then
 		task.defer(Seats.givePhone, model)
 	end
 	if math.random() < HEAD_TRACK_SHARE then
@@ -153,12 +169,14 @@ end
 function Seats.populate(folder: Instance, taken: { [Instance]: boolean }): ({ Model }, { Seat })
 	local models: { Model } = {}
 	local used: { Seat } = {}
+	local isUsed: { [Seat]: boolean } = {}
 	local spots = collectSpots(taken)
 	local count = math.floor(#spots * FILL + 0.5)
 	for i = 1, count do
 		local spot = spots[i]
 		table.insert(models, spawnSitter(spot, folder))
-		if not table.find(used, spot.seat) then
+		if not isUsed[spot.seat] then
+			isUsed[spot.seat] = true
 			table.insert(used, spot.seat)
 		end
 		if i % SPAWN_BATCH == 0 then

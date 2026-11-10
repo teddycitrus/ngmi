@@ -26,24 +26,25 @@ local ALU = Color3.fromRGB(176, 180, 186)
 local Office = {}
 
 --- A five-star task chair, facing -Z within `at`. With `asSeat` the cushion
---- is a real Seat named "Seat".
+--- is a real Seat named "Seat". The cushion top is at Y 1.72, an adult's knee
+--- height (the NPC bodies stand 6.4 tall with their knees at about 1.9).
 function Office.chair(m: Model, at: CFrame, fabric: Color3, asSeat: boolean)
 	for i = 0, 4 do
 		local spoke = at * CFrame.Angles(0, math.rad(i * 72 + 36), 0)
 		Kit.trim(m, "ChairLeg", V(0.2, 0.22, 1.1), spoke * CF(0, 0.3, -0.5) * CFrame.Angles(math.rad(-8), 0, 0), PLASTIC_DARK, M.SmoothPlastic)
 	end
-	Kit.cylY(m, "GasLift", 1.1, 0.2, at * CF(0, 1.05, 0), CHROME, M.Metal, { collide = false })
-	Kit.trim(m, "SeatPan", V(1.8, 0.16, 1.75), at * CF(0, 1.68, 0), PLASTIC_DARK, M.SmoothPlastic)
+	Kit.cylY(m, "GasLift", 0.8, 0.2, at * CF(0, 0.88, 0), CHROME, M.Metal, { collide = false })
+	Kit.trim(m, "SeatPan", V(1.8, 0.16, 1.75), at * CF(0, 1.35, 0), PLASTIC_DARK, M.SmoothPlastic)
 	if asSeat then
-		Kit.seat(m, "Seat", V(1.9, 0.3, 1.85), at * CF(0, 1.9, -0.02), fabric, M.Fabric)
+		Kit.seat(m, "Seat", V(1.9, 0.3, 1.85), at * CF(0, 1.57, -0.02), fabric, M.Fabric)
 	else
-		Kit.part(m, "ChairSeat", V(1.9, 0.3, 1.85), at * CF(0, 1.9, -0.02), fabric, M.Fabric)
+		Kit.part(m, "ChairSeat", V(1.9, 0.3, 1.85), at * CF(0, 1.57, -0.02), fabric, M.Fabric)
 	end
-	Kit.trim(m, "BackPost", V(0.3, 1.3, 0.14), at * CF(0, 2.35, 0.98) * CFrame.Angles(math.rad(8), 0, 0), PLASTIC_DARK, M.SmoothPlastic)
-	Kit.part(m, "ChairBack", V(1.75, 1.9, 0.26), at * CF(0, 3.3, 1.08) * CFrame.Angles(math.rad(9), 0, 0), fabric, M.Fabric)
+	Kit.trim(m, "BackPost", V(0.3, 1.3, 0.14), at * CF(0, 2.02, 0.98) * CFrame.Angles(math.rad(8), 0, 0), PLASTIC_DARK, M.SmoothPlastic)
+	Kit.part(m, "ChairBack", V(1.75, 1.9, 0.26), at * CF(0, 2.97, 1.08) * CFrame.Angles(math.rad(9), 0, 0), fabric, M.Fabric)
 	for _, sx in { -1, 1 } do
-		Kit.trim(m, "ArmPost", V(0.14, 0.62, 0.14), at * CF(sx * 0.98, 2.3, 0.25), PLASTIC_DARK, M.SmoothPlastic)
-		Kit.trim(m, "ArmPad", V(0.24, 0.1, 0.95), at * CF(sx * 0.98, 2.65, 0.12), PLASTIC_DARK, M.Rubber)
+		Kit.trim(m, "ArmPost", V(0.14, 0.62, 0.14), at * CF(sx * 0.98, 1.97, 0.25), PLASTIC_DARK, M.SmoothPlastic)
+		Kit.trim(m, "ArmPad", V(0.24, 0.1, 0.95), at * CF(sx * 0.98, 2.32, 0.12), PLASTIC_DARK, M.Rubber)
 	end
 end
 
@@ -51,11 +52,14 @@ end
 -- Workstation
 -- Contract: "Desk" (top, PlayerDesk tag), "Seat" (invisible typist marker at
 -- local (0, 0, 1.8)), and a "Monitor" model ambient laptop users delete. The
--- desk top surface is at Y 3.26, where AmbientPopulation sets its laptops.
+-- desk top surface is at Office.DESK_TOP, sized to the NPC bodies: seated on
+-- the chair (1.72), their elbows rest at about 2.8.
 --------------------------------------------------------------------------------
+Office.DESK_TOP = 2.75
+
 local function workstation(): Model
 	local m = Kit.model("Workstation")
-	local top = 3.26
+	local top = Office.DESK_TOP
 	Kit.part(m, "Desk", V(6, 0.14, 3), CF(0, top - 0.07, 0), LAMINATE, M.Wood)
 	for _, sx in { -1, 1 } do
 		Kit.part(m, "Leg", V(0.22, top - 0.32, 0.22), CF(sx * 2.7, (top - 0.18) / 2 + 0.02, -0.2), FRAME, M.Metal)
@@ -64,10 +68,11 @@ local function workstation(): Model
 	Kit.trim(m, "Modesty", V(5.2, 1.3, 0.06), CF(0, top - 1.0, -1.32), Color3.fromRGB(96, 98, 104), M.DiamondPlate)
 
 	-- three-drawer pedestal on the right
-	Kit.part(m, "Pedestal", V(1.3, 2.5, 2.24), CF(2.0, 1.31, -0.17), Color3.fromRGB(214, 212, 206), M.SmoothPlastic)
+	local ped = top - 0.76
+	Kit.part(m, "Pedestal", V(1.3, ped, 2.24), CF(2.0, 0.06 + ped / 2, -0.17), Color3.fromRGB(214, 212, 206), M.SmoothPlastic)
 	for i = 0, 2 do
-		local y = 0.55 + i * 0.8
-		Kit.trim(m, "Drawer", V(1.22, 0.72, 0.05), CF(2.0, y, 0.97), Color3.fromRGB(226, 224, 218), M.SmoothPlastic)
+		local y = 0.06 + ped / 6 + i * ped / 3
+		Kit.trim(m, "Drawer", V(1.22, ped / 3 - 0.08, 0.05), CF(2.0, y, 0.97), Color3.fromRGB(226, 224, 218), M.SmoothPlastic)
 	end
 
 	-- fabric privacy screen along the back edge

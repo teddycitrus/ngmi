@@ -73,7 +73,7 @@ local function desk(parent: Instance, x: number, y: number, z: number, yaw: numb
 		seat:Destroy()
 	end
 	if math.random() < 0.7 then
-		Decor.scatter(parent, x - 2.6, x - 1.2, z - 0.6, z + 0.6, y + 3.26, math.random(1, 2))
+		Decor.scatter(parent, x - 2.6, x - 1.2, z - 0.6, z + 0.6, y + 2.75, math.random(1, 2)) -- on the desk top (Office.DESK_TOP)
 	end
 	if st.idx % 5 == 0 then
 		hideSpot(parent, V(x, y + 1.3, z))
