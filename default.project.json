@@ -39,6 +39,7 @@
         "PanelRepaired": { "$className": "RemoteEvent" },
         "OpenPanelPuzzle": { "$className": "RemoteEvent" },
         "CutsceneTrigger": { "$className": "RemoteEvent" },
+        "OpeningReady": { "$className": "RemoteEvent" },
         "EndingTrigger": { "$className": "RemoteEvent" },
         "FlashlightToggle": { "$className": "RemoteEvent" },
         "FlashlightRecharge": { "$className": "RemoteEvent" },

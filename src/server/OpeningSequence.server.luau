@@ -17,12 +17,14 @@ local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage     = game:GetService("ServerStorage")
 local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local RigFactory = require(script.Parent.RigFactory)
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
+local OpeningReady = Remotes:WaitForChild("OpeningReady") :: RemoteEvent
 
 --------------------------------------------------------------------------------
 -- Auditorium geometry — mirrors MapBuilder's AUD block on the ground floor.
@@ -55,9 +57,12 @@ local ORG_GESTURES = { "welcome", "point", "emphasis", "shrug_sweep", "sprint", 
 
 -- Seconds of exterior establishing shot before the talk begins.
 local INTRO_SECONDS = 4.5
--- Seconds each client gets to build the crowd and settle lighting under a
--- black cover before the shared start time.
-local CLIENT_PREP_SECONDS = 2.5
+-- Each client builds the crowd, downloads every asset and renders every shot
+-- once under a black cover, then reports ready. The scene starts when all
+-- have (or this many seconds pass, so one stuck client can't hold the rest).
+local READY_TIMEOUT = 45
+-- Seconds between the go signal and the first frame, so it reaches everyone.
+local GO_LEAD = 0.4
 -- Seconds each caption stays on screen. The welcome and sign-off are short;
 -- the instructions in between stay up long enough to read twice.
 local LINE_SECONDS = { 4, 6.5, 6, 5.5, 6, 8.5, 5 }
@@ -306,13 +311,26 @@ local function runOpening()
 		end
 	end
 
-	-- Roll the cinematic on every client. Each client builds its set under a
-	-- black cover, then all of them start together at startAt.
-	local startAt = workspace:GetServerTimeNow() + CLIENT_PREP_SECONDS
+	-- Roll the cinematic on every client. Each client builds and loads its set
+	-- under a black cover and reports ready; once every one has, the go time
+	-- goes out on workspace attributes and they all start together.
+	local goId = HttpService:GenerateGUID(false)
+	local waiting: { [Player]: boolean } = {}
 	for _, plr in Players:GetPlayers() do
+		waiting[plr] = true
+	end
+	local readyConn = OpeningReady.OnServerEvent:Connect(function(plr: Player, id: any)
+		if id == goId then
+			waiting[plr] = nil
+		end
+	end)
+	local leftConn = Players.PlayerRemoving:Connect(function(plr: Player)
+		waiting[plr] = nil
+	end)
+	for plr in waiting do
 		CutsceneTrigger:FireClient(plr, {
 			cutscene = "opening",
-			startAt = startAt,
+			goId = goId,
 			lines = ORG_LINES,
 			gestures = ORG_GESTURES,
 			durations = LINE_SECONDS,
@@ -328,9 +346,18 @@ local function runOpening()
 		})
 	end
 
+	local readyBy = os.clock() + READY_TIMEOUT
+	while next(waiting) ~= nil and os.clock() < readyBy do
+		task.wait(0.1)
+	end
+	readyConn:Disconnect()
+	leftConn:Disconnect()
+	workspace:SetAttribute("OpeningGoAt", workspace:GetServerTimeNow() + GO_LEAD)
+	workspace:SetAttribute("OpeningGoId", goId)
+
 	-- Let the talk play out (intro + one beat per line + the applause outro, to
 	-- match the client cinematic), then everyone disperses.
-	task.wait(CLIENT_PREP_SECONDS + INTRO_SECONDS + talkSeconds + 2.8)
+	task.wait(GO_LEAD + INTRO_SECONDS + talkSeconds + 2.8)
 
 	-- Each NPC stands, walks up the centre aisle to the north doorway, steps into
 	-- the corridor and rounds the corner — then (now out of sight) is relocated to

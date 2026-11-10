@@ -24,6 +24,7 @@ local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local ContentProvider = game:GetService("ContentProvider")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = script.Parent
 local RigPose = require(Shared.RigPose)
@@ -48,7 +49,10 @@ export type Context = {
 local PER_LINE = 3.4 -- per caption when the server sends no durations
 local LINE_LEAD = 0.3
 local OUTRO = 1.4
-local PRELOAD_TIMEOUT = 4 -- seconds the crowd/audio preload may hold the start
+local PREP_TIMEOUT = 40 -- last-resort cap on loading and warming the set
+local WARM_FRAMES = 4 -- frames each shot is rendered under the cover
+local MIN_WARM_PASSES = 2 -- full passes over the shots, even with nothing left to fetch
+local GO_TIMEOUT = 50 -- how long to wait for the server's go after reporting ready
 local MIN_SETTLE = 1 -- seconds the camera sits on the first frame under the cover
 local MAX_START_WAIT = 6 -- never wait longer than this for the server's start time
 
@@ -308,8 +312,11 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 	local total = talkStart + talkLen + OUTRO
 
 	---------------------------------------------------------------- prep
-	-- Fetch the crowd's meshes and textures and the scene audio before the
-	-- first frame, capped so a slow asset never stalls the scene.
+	-- Nothing goes on screen until all of it is in: every mesh, texture and
+	-- sound downloaded, and every shot rendered under the cover. The renderer
+	-- composites clothing, wraps layered accessories and picks mesh detail
+	-- only for what the camera actually sees, so a crowd that was never on
+	-- screen pops in on its first shot even with its assets downloaded.
 	local preloadDone = false
 	task.spawn(function()
 		local list: { Instance } = { set, walla, applause }
@@ -321,13 +328,46 @@ function OpeningCinematic.play(data: { [string]: any }, ctx: Context)
 		end)
 		preloadDone = true
 	end)
-	local preloadDeadline = os.clock() + PRELOAD_TIMEOUT
-	while not preloadDone and os.clock() < preloadDeadline do
-		task.wait()
+	local warmShots: { { CFrame | number } } = {}
+	for _, u in { 0, 0.5, 1 } do
+		local cf, fov = introShot(u)
+		table.insert(warmShots, { cf, fov })
+		for _, shot in SHOTS do
+			local scf, sfov = shot(u, 0)
+			table.insert(warmShots, { scf, sfov })
+		end
 	end
-	-- Start on the server's shared clock so every client and the server's NPC
-	-- dispersal line up; always give the renderer a minimum settle.
+	local prepBy = os.clock() + PREP_TIMEOUT
+	local passes = 0
+	repeat
+		for _, w in warmShots do
+			camera.CFrame = w[1] :: CFrame
+			camera.FieldOfView = w[2] :: number
+			for _ = 1, WARM_FRAMES do
+				RunService.RenderStepped:Wait()
+			end
+		end
+		passes += 1
+		local loaded = preloadDone and ContentProvider.RequestQueueSize == 0
+	until (loaded and passes >= MIN_WARM_PASSES) or os.clock() > prepBy
+	local firstCf, firstFov = introShot(0)
+	camera.CFrame = firstCf
+	camera.FieldOfView = firstFov
+
+	-- Tell the server this client is ready; it sends one shared start time
+	-- once every client is, so nobody's scene starts before its set is in.
 	local startAt = data.startAt :: number?
+	local goId = data.goId :: string?
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	local ready = remotes and remotes:FindFirstChild("OpeningReady")
+	if goId and ready and ready:IsA("RemoteEvent") then
+		ready:FireServer(goId)
+		local goBy = os.clock() + GO_TIMEOUT
+		while workspace:GetAttribute("OpeningGoId") ~= goId and os.clock() < goBy do
+			task.wait()
+		end
+		startAt = workspace:GetAttribute("OpeningGoAt") :: number?
+	end
 	if startAt then
 		local untilStart = math.min(startAt - workspace:GetServerTimeNow(), MAX_START_WAIT)
 		if untilStart > 0 then
