@@ -138,6 +138,11 @@ export type Look = {
 	shoes: { number },
 	height: number?, -- multiplier on RigFactory's standing height
 	width: number?,
+	-- Hair is cut for a standard head. On a deeper head it sits forward and
+	-- leaves the back of the skull bare, so it is scaled up about its
+	-- attachment and the head's HairAttachment moved by `offset` (studs, head
+	-- space, at the adult build).
+	hairFit: { scale: number, offset: Vector3 }?,
 }
 
 local function look(key: string, person: Person, hair: number, clothes: { Item }, shoes: { number }, extra: { [string]: any }?): Look
@@ -152,7 +157,9 @@ end
 Looks.CROWD = {
 	look("crowdA", PERSON.kenji, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
 	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite, { height = 0.95 }),
-	look("crowdC", PERSON.deshawn, HAIR.blackCurly, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan),
+	look("crowdC", PERSON.deshawn, HAIR.blackCurly, { TOP.flannelGreen, BOTTOM.cargoBrown }, SHOES.bootsTan, {
+		hairFit = { scale = 1.14, offset = Vector3.new(0, -0.03, 0.12) },
+	}),
 	look("crowdD", PERSON.nia, HAIR.blackCurly, { TOP.greyTee, TOP.hoodedGrey, BOTTOM.sweatsBlack }, SHOES.sneakerGrey, { height = 0.95 }),
 } :: { Look }
 

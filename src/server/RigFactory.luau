@@ -127,6 +127,42 @@ local function getTemplate(look: Looks.Look): Model?
 				built:ScaleTo(built:GetScale() * want / h)
 				task.wait()
 			end
+			local fit = look.hairFit
+			local head = built:FindFirstChild("Head")
+			local anchor = head and head:FindFirstChild("HairAttachment")
+			if fit and anchor and anchor:IsA("Attachment") then
+				-- Humanoid rescaling rebuilds accessory sizes and attachment
+				-- positions from their Original* values, so those move too
+				-- or the next rescale throws the fit away.
+				local function scaleValue(parent: Instance, name: string, k: number)
+					local v = parent:FindFirstChild(name)
+					if v and v:IsA("Vector3Value") then
+						v.Value *= k
+					end
+				end
+				for _, acc in built:GetChildren() do
+					local handle = acc:IsA("Accessory") and acc.AccessoryType == Enum.AccessoryType.Hair and acc:FindFirstChild("Handle")
+					if handle and handle:IsA("BasePart") then
+						-- grow about the attachment point so the hair stays seated
+						handle.Size *= fit.scale
+						scaleValue(handle, "OriginalSize", fit.scale)
+						for _, a in handle:GetChildren() do
+							if a:IsA("Attachment") then
+								a.Position *= fit.scale
+								scaleValue(a, "OriginalPosition", fit.scale)
+							end
+						end
+					end
+				end
+				anchor.Position += fit.offset
+				local orig = anchor:FindFirstChild("OriginalPosition")
+				local hum = built:FindFirstChildOfClass("Humanoid")
+				local headScale = hum and hum:FindFirstChild("HeadScale")
+				if orig and orig:IsA("Vector3Value") then
+					local k = if headScale and headScale:IsA("NumberValue") and headScale.Value > 0 then headScale.Value else 1
+					orig.Value += fit.offset / k
+				end
+			end
 			built.Parent = nil
 			if root then
 				root.Anchored = wasAnchored :: boolean

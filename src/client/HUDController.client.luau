@@ -362,11 +362,16 @@ if not isMobile then
                 player.CameraMode == Enum.CameraMode.LockFirstPerson
                 or UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
             )
+        -- no dot while an NPC is talking; it comes back as the cursor with the replies
+        local dotWanted = locked and player:GetAttribute("InDialogue") ~= true
+        if locked == reticleShown and dotWanted == reticle.Visible then
+            return
+        end
+        reticle.Visible = dotWanted
         if locked == reticleShown then
             return
         end
         reticleShown = locked
-        reticle.Visible = locked
         UserInputService.MouseIconEnabled = not locked
     end)
 end

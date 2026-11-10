@@ -361,8 +361,26 @@ end)
 -- ============================================================
 -- REMOTE EVENT LISTENERS
 -- ============================================================
+-- A phase change fired before this script connected goes to whichever
+-- listener connected first, so on a slow load the opening's DAY1 never
+-- reaches here. ReplicatedStorage.CurrentPhase mirrors the phase and covers
+-- both that and joining mid-match; the remote is kept as the fast path.
+local function onPhase(phase: number?)
+	if typeof(phase) == "number" and phase ~= currentPhase then
+		setPhase(phase)
+	end
+end
 GameStateChanged.OnClientEvent:Connect(function(data: { phase: number })
-	setPhase(data.phase)
+	if typeof(data) == "table" then
+		onPhase(data.phase)
+	end
+end)
+task.spawn(function()
+	local phaseValue = ReplicatedStorage:WaitForChild("CurrentPhase", 30)
+	if phaseValue and phaseValue:IsA("IntValue") then
+		phaseValue.Changed:Connect(onPhase)
+		onPhase(phaseValue.Value)
+	end
 end)
 
 -- Coding progress drives the coding objectives (and the gated final task).
@@ -433,5 +451,6 @@ end)
 content.Visible = not isCollapsed
 separator.Visible = not isCollapsed
 layoutPanel(false)
+applyVisibility()
 
 print("[ObjectivesUI] Initialized - procedural objectives ready (J to toggle)")
