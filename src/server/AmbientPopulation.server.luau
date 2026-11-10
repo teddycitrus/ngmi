@@ -137,12 +137,14 @@ local LEAN_TILT = math.rad(8) -- how far the body tips back onto the wall
 local FEET_OUT = 1.2 -- feet distance from the wall face; puts the shoulder blades on it
 local WALL_PROBE = 4.2 -- probe height: above the chair rail, below the posters
 
+local wallParams = RaycastParams.new()
+wallParams.FilterType = Enum.RaycastFilterType.Exclude
+
 --- Distance along `dir` to a true wall face, skipping things in front of it
 --- (banners, bins, people). Returns the hit position and the distance of the
 --- nearest skipped thing, or nil when no wall is in reach.
 local function castToWall(origin: Vector3, dir: Vector3): (Vector3?, number, number)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
+	local params = wallParams
 	local ignore: { Instance } = { folder }
 	params.FilterDescendantsInstances = ignore
 	local lastClutter = 0
@@ -167,13 +169,15 @@ end
 
 -- Clear depth needed in front of the wall for a leaning body.
 local LEAN_CLEARANCE = FEET_OUT + 1.4
+local WALL_DIRS = { V(1, 0, 0), V(-1, 0, 0), V(0, 0, 1), V(0, 0, -1) }
+local SPOT_OFFSETS = { V(0, 0, 0), V(4, 0, 0), V(-4, 0, 0), V(0, 0, 4), V(0, 0, -4), V(8, 0, 0), V(-8, 0, 0) }
 
 --- Nearest wall face from `origin` with room in front of it to lean: anything
 --- standing against the wall there (lockers, a bench, a fountain) rules that
 --- direction out, so a leaner never ends up inside the furniture.
 local function nearestWall(origin: Vector3): (Vector3?, Vector3?)
 	local best, bestDir, bestDist = nil, nil, math.huge
-	for _, dir in { V(1, 0, 0), V(-1, 0, 0), V(0, 0, 1), V(0, 0, -1) } do
+	for _, dir in WALL_DIRS do
 		local side = dir:Cross(Vector3.yAxis)
 		local pos, dist = nil, math.huge
 		local clear = true
@@ -202,7 +206,7 @@ local function spawnLeaning(spot: Part)
 	local floorY = spot.Position.Y - 0.2
 	-- try the marker, then a few spots either side of it
 	local wallPos, wallDir
-	for _, off in { V(0, 0, 0), V(4, 0, 0), V(-4, 0, 0), V(0, 0, 4), V(0, 0, -4), V(8, 0, 0), V(-8, 0, 0) } do
+	for _, off in SPOT_OFFSETS do
 		wallPos, wallDir = nearestWall(V(spot.Position.X, floorY + WALL_PROBE, spot.Position.Z) + off)
 		if wallPos then
 			break
@@ -392,6 +396,8 @@ local populated = false
 local function ensurePopulated()
 	if not populated then
 		populated = true
+		-- build every outfit once before the crowd is cloned from them
+		RigFactory.preloadLooks(20)
 		populate()
 	end
 end

@@ -3,10 +3,10 @@
 -- RigFactory.luau  (ModuleScript)
 -- Produces real Roblox R15 avatar rigs for NPCs.
 --
--- A single template avatar is generated once via CreateHumanoidModelFromDescription
--- and cloned per NPC (fast). Each clone gets randomised hoodie / skin / pant
--- colours so the crowd looks varied. If the avatar API is ever unavailable the
--- factory falls back to a simple blocky humanoid so the game never breaks.
+-- Template avatars are generated once per outfit (Rig/Looks) via
+-- CreateHumanoidModelFromDescription and cloned per NPC (fast). If the avatar
+-- API is ever unavailable the factory falls back to a simple blocky humanoid so
+-- the game never breaks.
 --------------------------------------------------------------------------------
 
 local Players = game:GetService("Players")
@@ -19,20 +19,6 @@ local ANIM = {
 	idle = "rbxassetid://507766388",
 	walk = "rbxassetid://507777826",
 	sit = "rbxassetid://2506281703",
-}
-
---------------------------------------------------------------------------------
--- Surfacing
---------------------------------------------------------------------------------
--- Roblox's built-in materials carry their own PBR response, so Fabric on
--- clothing reads as cloth under Future lighting with no uploaded assets.
---------------------------------------------------------------------------------
-
--- Built-in material per body region. These apply unconditionally.
-local MATERIALS = {
-	skin = Enum.Material.SmoothPlastic,
-	clothing = Enum.Material.Fabric,
-	pants = Enum.Material.Fabric,
 }
 
 local HOODIES = {
@@ -53,36 +39,25 @@ local SKINS = {
 }
 local PANTS = { Color3.fromRGB(40, 44, 55), Color3.fromRGB(60, 62, 70), Color3.fromRGB(80, 70, 60) }
 
-local TORSO_PARTS = { "UpperTorso", "LowerTorso" }
-local ARM_PARTS = { "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand" }
-local SKIN_PARTS = { "Head" }
-local LEG_PARTS = { "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }
-
 --------------------------------------------------------------------------------
--- Template
+-- Templates: one per look (Rig/Looks), built once and cloned per rig
 --------------------------------------------------------------------------------
-local template: Model? = nil
-local triedTemplate = false
+local Looks = require(script.Parent:WaitForChild("Rig"):WaitForChild("Looks"))
+local templates: { [string]: Model | false } = {}
 
---- Description used for every rig. BodyTypeScale/ProportionScale at 1 pulls the
---- default R15 away from the blocky classic build toward realistic human
---- proportions, which is the single biggest fidelity win available without
---- uploaded body-part assets. Add bundle part ids here (HeadColor, Torso, ...)
---- to swap in a purchased Rthro body.
-local function buildDescription(): HumanoidDescription
-	local desc = Instance.new("HumanoidDescription")
-	desc.BodyTypeScale = 1
-	desc.ProportionScale = 1
-	desc.HeightScale = 1
-	desc.WidthScale = 1
-	desc.DepthScale = 1
-	return desc
-end
-
-local function buildTemplate(): Model?
+local function buildTemplate(desc: HumanoidDescription, key: string): Model?
 	local ok, model = pcall(function()
-		return Players:CreateHumanoidModelFromDescription(buildDescription(), Enum.HumanoidRigType.R15)
+		return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
 	end)
+	if not ok and #desc:GetAccessories(false) > 0 then
+		-- one catalog item gone (taken off sale, moderated) fails the whole
+		-- build; keep the person, drop the clothes
+		warn("[RigFactory] look " .. key .. " clothes failed, retrying without: " .. tostring(model))
+		desc:SetAccessories({}, false)
+		ok, model = pcall(function()
+			return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
+		end)
+	end
 	if ok and model and model:IsA("Model") then
 		model.Name = "RigTemplate"
 		-- Strip any default scripts that assume a player owns it.
@@ -91,17 +66,41 @@ local function buildTemplate(): Model?
 				d:Destroy()
 			end
 		end
+		model:SetAttribute("Look", key)
 		return model
 	end
+	warn("[RigFactory] look " .. key .. " failed: " .. tostring(model))
 	return nil
 end
 
-local function getTemplate(): Model?
-	if not triedTemplate then
-		triedTemplate = true
-		template = buildTemplate()
+local function getTemplate(look: Looks.Look): Model?
+	local t = templates[look.key]
+	if t == nil then
+		t = buildTemplate(Looks.describe(look), look.key) or false
+		templates[look.key] = t
 	end
-	return template
+	return if t then t else nil
+end
+
+--- Build every outfit's template up front, in parallel, so the first wave of
+--- rigs doesn't stall on one catalog fetch after another. Returns once all
+--- are built or `timeout` seconds pass.
+function RigFactory.preloadLooks(timeout: number)
+	local all: { Looks.Look } = table.clone(Looks.CROWD)
+	for _, l in Looks.NAMED do
+		table.insert(all, l)
+	end
+	local pending = #all
+	for _, l in all do
+		task.spawn(function()
+			getTemplate(l)
+			pending -= 1
+		end)
+	end
+	local deadline = os.clock() + timeout
+	while pending > 0 and os.clock() < deadline do
+		task.wait(0.1)
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -164,47 +163,11 @@ local function buildBlockRig(): Model
 end
 
 --------------------------------------------------------------------------------
--- Colour a real rig
---------------------------------------------------------------------------------
---- Colour + surface a real rig. Region names map to a colour and a built-in
---- material.
-local function recolor(model: Model)
-	local hoodie = HOODIES[math.random(#HOODIES)]
-	local skin = SKINS[math.random(#SKINS)]
-	local pants = PANTS[math.random(#PANTS)]
-
-	local function surface(names: { string }, color: Color3, region: string)
-		local material = MATERIALS[region]
-		for _, n in names do
-			local part = model:FindFirstChild(n)
-			if part and part:IsA("BasePart") then
-				part.Color = color
-				part.Material = material
-			end
-		end
-	end
-
-	surface(TORSO_PARTS, hoodie, "clothing")
-	surface(ARM_PARTS, hoodie, "clothing")
-	surface(SKIN_PARTS, skin, "skin")
-	surface(LEG_PARTS, pants, "pants")
-end
-
---------------------------------------------------------------------------------
 -- Public API
 --------------------------------------------------------------------------------
 
---- Create an NPC rig. Returns (model, humanoid). The caller positions it with
---- model:PivotTo(...) and parents it.
-function RigFactory.create(): (Model, Humanoid)
-	local t = getTemplate()
-	local model: Model
-	if t then
-		model = t:Clone()
-		recolor(model)
-	else
-		model = buildBlockRig()
-	end
+local function finish(t: Model?): (Model, Humanoid)
+	local model = if t then t:Clone() else buildBlockRig()
 	local hum = model:FindFirstChildOfClass("Humanoid") :: Humanoid
 	hum.BreakJointsOnDeath = false
 	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
@@ -212,6 +175,58 @@ function RigFactory.create(): (Model, Humanoid)
 		model.PrimaryPart = model:FindFirstChild("HumanoidRootPart") :: BasePart
 	end
 	return model, hum
+end
+
+--- Create an NPC rig. Returns (model, humanoid). The caller positions it with
+--- model:PivotTo(...) and parents it. `id` picks a named NPC's own outfit
+--- (Looks.NAMED, keyed by NPCConfig id); anything else gets one of the
+--- crowd's four, in a random skin tone so repeats are harder to spot.
+local SKIN_PARTS_ALL = {
+	"Head",
+	"UpperTorso",
+	"LowerTorso",
+	"LeftUpperArm",
+	"LeftLowerArm",
+	"LeftHand",
+	"RightUpperArm",
+	"RightLowerArm",
+	"RightHand",
+	"LeftUpperLeg",
+	"LeftLowerLeg",
+	"LeftFoot",
+	"RightUpperLeg",
+	"RightLowerLeg",
+	"RightFoot",
+}
+function RigFactory.create(id: string?): (Model, Humanoid)
+	local named = id and Looks.NAMED[id]
+	if named then
+		return finish(getTemplate(named))
+	end
+	local model, hum = finish(getTemplate(Looks.CROWD[math.random(#Looks.CROWD)]))
+	if model:GetAttribute("Look") then
+		local skin = Looks.SKIN[math.random(#Looks.SKIN)]
+		for _, n in SKIN_PARTS_ALL do
+			local part = model:FindFirstChild(n)
+			if part and part:IsA("BasePart") then
+				part.Color = skin
+			end
+		end
+	end
+	return model, hum
+end
+
+-- The NGMI base: Roblox's plain default R15 body and head, with no bundle
+-- parts, hair, accessories or clothes, so an NGMI is only ever its mutation
+-- style and never carries a venue person's items.
+local baseTemplate: Model | false | nil = nil
+
+--- A blank body for NGMIMutation to build a style on.
+function RigFactory.createBase(): (Model, Humanoid)
+	if baseTemplate == nil then
+		baseTemplate = buildTemplate(Instance.new("HumanoidDescription"), "ngmi") or false
+	end
+	return finish(if baseTemplate then baseTemplate else nil)
 end
 
 local function getAnimator(hum: Humanoid): Animator
@@ -223,10 +238,22 @@ local function getAnimator(hum: Humanoid): Animator
 	return animator
 end
 
+-- One Animation object per id, shared by every rig that loads it.
+local animations: { [string]: Animation } = {}
+
+local function animation(animId: string): Animation
+	local anim = animations[animId]
+	if not anim then
+		anim = Instance.new("Animation")
+		anim.AnimationId = animId
+		animations[animId] = anim
+	end
+	return anim
+end
+
 --- Load a looping animation without starting it (nil on failure).
 local function loadLoop(hum: Humanoid, animId: string): AnimationTrack?
-	local anim = Instance.new("Animation")
-	anim.AnimationId = animId
+	local anim = animation(animId)
 	local ok, track = pcall(function()
 		return getAnimator(hum):LoadAnimation(anim)
 	end)
@@ -346,9 +373,17 @@ export type HeadPieceOpts = Hair.HeadPieceOpts
 Hair.knitColors = HOODIES
 
 RigFactory.attachToHead = Hair.attachToHead
-RigFactory.applyHair = Hair.applyHair
+-- Look rigs wear real hair accessories; the old part-built hair is only for
+-- the block fallback.
+function RigFactory.applyHair(model: Model, ...: any): string?
+	if model:GetAttribute("Look") then
+		return nil
+	end
+	return Hair.applyHair(model, ...)
+end
 RigFactory.enableHeadTracking = IK.enableHeadTracking
 RigFactory.enableFootPlacement = IK.enableFootPlacement
+RigFactory.HEAD_TRACK_SUSPEND = IK.SUSPEND_ATTRIBUTE
 RigFactory.articulate = Articulation.articulate
 RigFactory.resetArticulation = Articulation.resetArticulation
 RigFactory.rampArticulation = Articulation.rampArticulation
