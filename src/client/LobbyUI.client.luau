@@ -41,9 +41,9 @@ local tween = Parts.tween
 local STAGE_W, STAGE_H = 1600, 900
 local BACKGROUND = Color3.fromRGB(8, 8, 10)
 local MODES = {
-	{ size = 1, name = "Solo", desc = "One keyboard. No backup." },
-	{ size = 2, name = "Duo", desc = "Pair programming under pressure." },
-	{ size = 4, name = "Team", desc = "Full squad. Full chaos." },
+	{ size = 1, name = "Solo" },
+	{ size = 2, name = "Duo" },
+	{ size = 4, name = "Team" },
 }
 
 type State = PartyPanel.State
@@ -203,7 +203,7 @@ local function build()
 	caption.LayoutOrder = 3
 
 	for i, m in MODES do
-		rows[m.size] = Parts.row(left, 3 + i, m.size, m.name, m.desc, function()
+		rows[m.size] = Parts.row(left, 3 + i, m.size, m.name, function()
 			local s = lastState
 			return s ~= nil and s.party ~= nil and s.party.mode == m.size
 		end, function()

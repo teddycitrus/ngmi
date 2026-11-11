@@ -34,7 +34,7 @@ Parts.LINE_IDLE = 0.82
 Parts.LINE_HOVER = 0.6
 Parts.NAME_IDLE = 0.15
 local HOVER_SHIFT = 10
-local ROW_HEIGHT = 96
+local ROW_HEIGHT = 72
 
 function Parts.tween(obj: Instance, props: { [string]: any }, t: number?)
 	TweenService:Create(obj, TweenInfo.new(t or 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
@@ -59,7 +59,7 @@ export type Row = {
 
 --- One mode in the list: an open line of type over a hairline, not a card.
 --- `isActive` says whether this is the party's mode; `onPick` runs on click.
-function Parts.row(parent: Instance, order: number, queueSize: number, name: string, desc: string, isActive: () -> boolean, onPick: () -> ()): Row
+function Parts.row(parent: Instance, order: number, queueSize: number, name: string, isActive: () -> boolean, onPick: () -> ()): Row
 	local enabled = true
 	local button = Instance.new("TextButton")
 	button.Name = "Mode_" .. queueSize
@@ -84,20 +84,16 @@ function Parts.row(parent: Instance, order: number, queueSize: number, name: str
 	-- Red bar at the left, shown for the party's mode
 	local marker = Instance.new("Frame")
 	marker.Name = "Marker"
-	marker.Position = UDim2.fromOffset(-20, 18)
-	marker.Size = UDim2.fromOffset(4, 56)
+	marker.Position = UDim2.fromOffset(-20, 12)
+	marker.Size = UDim2.fromOffset(4, 48)
 	marker.BackgroundColor3 = Parts.RED
 	marker.BackgroundTransparency = 1
 	marker.BorderSizePixel = 0
 	marker.Parent = button
 
 	local nameLabel = UITheme.label(button, { text = name, size = 50, font = Parts.SERIF, color = Parts.INK, transparency = Parts.NAME_IDLE, shadow = false })
-	nameLabel.Position = UDim2.fromOffset(0, 6)
+	nameLabel.Position = UDim2.fromOffset(0, 10)
 	nameLabel.Size = UDim2.new(1, -170, 0, 52)
-
-	local descLabel = UITheme.label(button, { text = desc, size = 22, font = Parts.BODY, color = Parts.MUTED, shadow = false })
-	descLabel.Position = UDim2.fromOffset(0, 60)
-	descLabel.Size = UDim2.new(1, -170, 0, 24)
 
 	local count = UITheme.label(button, {
 		text = "",
@@ -115,8 +111,7 @@ function Parts.row(parent: Instance, order: number, queueSize: number, name: str
 	local function hover(on: boolean)
 		local lit = (on and enabled) or isActive()
 		local shift = if lit then HOVER_SHIFT else 0
-		tween(nameLabel, { Position = UDim2.fromOffset(shift, 6), TextTransparency = if lit then 0 else Parts.NAME_IDLE })
-		tween(descLabel, { Position = UDim2.fromOffset(shift, 60) })
+		tween(nameLabel, { Position = UDim2.fromOffset(shift, 10), TextTransparency = if lit then 0 else Parts.NAME_IDLE })
 		tween(line, { BackgroundTransparency = if lit then Parts.LINE_HOVER else Parts.LINE_IDLE })
 	end
 	button.MouseEnter:Connect(function()

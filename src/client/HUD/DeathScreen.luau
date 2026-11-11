@@ -65,13 +65,11 @@ function DeathScreen.show()
     -- Tailor the message to what killed the player (set server-side as a
     -- DeathCause attribute on the hit that downed them).
     local cause = player:GetAttribute("DeathCause")
-    local titleText, subText = "YOU DIED", "Your repo dies with you."
+    local titleText = "YOU DIED"
     if cause == "poop" then
         titleText = "FLUSHED"
-        subText = "The Bathroom Monster dragged you under. You and your commits, straight down the drain."
     elseif cause == "ngmi" then
         titleText = "CAUGHT"
-        subText = "An NGMI sank its claws in. Your half-built repo dies with you."
     end
 
     local gui = Instance.new("ScreenGui")
@@ -94,15 +92,9 @@ function DeathScreen.show()
     title.TextTransparency = 1
     TweenService:Create(title, TweenInfo.new(2), { TextTransparency = 0 }):Play()
 
-    local sub = textLabel(bg, subText, UDim2.new(0.6, 0, 0.032, 0), UDim2.new(0.2, 0, 0.46, 0), UITheme.Font.Regular, UITheme.Color.Dim)
-    sub.TextTransparency = 1
-    TweenService:Create(sub, TweenInfo.new(2.5), { TextTransparency = 0.1 }):Play()
-
-    textLabel(bg, "GAME OVER", UDim2.new(0.6, 0, 0.022, 0), UDim2.new(0.2, 0, 0.56, 0), UITheme.Font.Mono, UITheme.Color.Faint)
-
     local btn = UITheme.button(bg, "Return to Lobby", 44)
     btn.Size = UDim2.fromOffset(220, 44)
-    btn.Position = UDim2.new(0.5, -110, 0.66, 0)
+    btn.Position = UDim2.new(0.5, -110, 0.5, 0)
     btn.TextSize = 15
 
     btn.Activated:Connect(function()
