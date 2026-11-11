@@ -154,6 +154,18 @@ local function look(key: string, person: Person, hair: number, clothes: { Item }
 end
 
 -- The crowd: four plain hackathon outfits, each on its own person.
+-- The NGMI bodies: the same realistic people with nothing on them. The
+-- mutation strips the avatar and repaints it anyway; what it keeps is the
+-- adult build, so the things hunting you have the venue's proportions, not
+-- the default blocky R15 the empty description gives.
+Looks.BARE = {} :: { Look }
+for _, name in { "deshawn", "kenji", "luke", "mateo", "emma", "mei", "sofia", "nia", "claire" } do
+	local person = PERSON[name]
+	if person then
+		table.insert(Looks.BARE, { key = "bare_" .. name, person = person, hair = {}, clothes = {}, shoes = {} } :: any)
+	end
+end
+
 Looks.CROWD = {
 	look("crowdA", PERSON.kenji, HAIR.brownLayered, { TOP.greyTee, TOP.zipBlack, BOTTOM.jeans }, SHOES.sneakerWhite),
 	look("crowdB", PERSON.sofia, HAIR.brownBun, { TOP.knitBeige, BOTTOM.jeansDark }, SHOES.canvasWhite, { height = 0.95 }),
@@ -203,8 +215,10 @@ function Looks.describe(l: Look): HumanoidDescription
 	for _, item in l.clothes do
 		add(item.id, item.slot)
 	end
-	add(l.shoes[1], "shoeL")
-	add(l.shoes[2], "shoeR")
+	if l.shoes[1] then
+		add(l.shoes[1], "shoeL")
+		add(l.shoes[2], "shoeR")
+	end
 	d:SetAccessories(layered, false)
 
 	-- The bodies' own adult build. BodyTypeScale below 1 pulls a shop body

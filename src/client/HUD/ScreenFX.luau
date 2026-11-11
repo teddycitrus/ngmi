@@ -75,6 +75,7 @@ bloodEdge("Left", UDim2.new(0.42, 0, 1, 0), UDim2.new(0, 0, 0, 0), Vector2.new(0
 bloodEdge("Right", UDim2.new(0.42, 0, 1, 0), UDim2.new(1, 0, 0, 0), Vector2.new(1, 0), 0, true)
 
 local effectIntensity = 0 -- 0 healthy → 1 near death (smoothed)
+local bloodTransparency = 1 -- last value written to the blood frames
 
 local function readHealthPct(): number?
     local char = player.Character
@@ -111,6 +112,10 @@ local function stepDamage(dt: number, currentPhase: number)
     -- ~0.18 (strong red) near death. Combined with the gradient this fades the
     -- blood from the screen edge toward a clear centre.
     local frameTransparency = 1 - math.clamp(i * 0.82, 0, 0.82)
+    if frameTransparency == bloodTransparency then
+        return
+    end
+    bloodTransparency = frameTransparency
     for _, f in bloodFrames do
         f.BackgroundTransparency = frameTransparency
     end
@@ -191,20 +196,31 @@ local function buildScanlines(parent: Instance, pitch: number, alpha: number)
     holder.ZIndex = 2
     holder.Parent = parent
 
-    -- Redrawn on resize so the rows always cover the viewport exactly.
+    -- Redrawn on resize so the rows always cover the viewport exactly. Row n
+    -- always sits at the same y, so a resize only adds or removes rows at the
+    -- bottom instead of rebuilding a few hundred frames every time.
+    local lines: { Frame } = {}
     local function redraw()
-        holder:ClearAllChildren()
         local height = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 1080
+        local count = 0
         for y = 0, math.ceil(height), pitch do
-            local line = Instance.new("Frame")
-            line.Size = UDim2.new(1, 0, 0, 1)
-            line.Position = UDim2.new(0, 0, 0, y)
-            line.BackgroundColor3 = Color3.new(0, 0, 0)
-            line.BackgroundTransparency = alpha
-            line.BorderSizePixel = 0
-            line.Active = false
-            line.ZIndex = 2
-            line.Parent = holder
+            count += 1
+            if not lines[count] then
+                local line = Instance.new("Frame")
+                line.Size = UDim2.new(1, 0, 0, 1)
+                line.Position = UDim2.new(0, 0, 0, y)
+                line.BackgroundColor3 = Color3.new(0, 0, 0)
+                line.BackgroundTransparency = alpha
+                line.BorderSizePixel = 0
+                line.Active = false
+                line.ZIndex = 2
+                line.Parent = holder
+                lines[count] = line
+            end
+        end
+        for n = #lines, count + 1, -1 do
+            lines[n]:Destroy()
+            lines[n] = nil
         end
     end
 

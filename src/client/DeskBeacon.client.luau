@@ -115,6 +115,12 @@ local function buildBeacon(deskPart: BasePart)
 	distLabel.Parent = billboard
 
 	-- ── Per-frame distance + proximity fade ──────────────────────────────────
+	-- Enabled is compared against the live value, not a cache: CutsceneHide and
+	-- CutsceneManager also switch it, and this loop must keep overriding them
+	-- exactly as an unconditional write would. Only this script writes the
+	-- pillar's Transparency and the distance text, so those are cached.
+	local pillarHidden = false
+	local shownMeters: number? = nil
 	RunService.RenderStepped:Connect(function()
 		local root = getRootPart()
 		if not root then
@@ -125,12 +131,26 @@ local function buildBeacon(deskPart: BasePart)
 
 		if dist <= FADE_DISTANCE then
 			-- You're at the desk — get out of the way
-			billboard.Enabled = false
-			pillar.Transparency = 1
+			if billboard.Enabled then
+				billboard.Enabled = false
+			end
+			if not pillarHidden then
+				pillarHidden = true
+				pillar.Transparency = 1
+			end
 		else
-			billboard.Enabled = true
-			pillar.Transparency = 0.55
-			distLabel.Text = string.format("%dm", math.floor(dist))
+			if not billboard.Enabled then
+				billboard.Enabled = true
+			end
+			if pillarHidden then
+				pillarHidden = false
+				pillar.Transparency = 0.55
+			end
+			local meters = math.floor(dist)
+			if meters ~= shownMeters then
+				shownMeters = meters
+				distLabel.Text = string.format("%dm", meters)
+			end
 		end
 	end)
 end

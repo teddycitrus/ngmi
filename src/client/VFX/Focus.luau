@@ -79,8 +79,8 @@ end
 --- racks rather than snaps. Decorative VFX parts set CanQuery = false, so they
 --- never steal focus.
 local function update(deltaTime: number)
-	local origin = camera.CFrame.Position
-	local result = workspace:Raycast(origin, camera.CFrame.LookVector * DOF_MAX_DISTANCE, params)
+	local camCF = camera.CFrame
+	local result = workspace:Raycast(camCF.Position, camCF.LookVector * DOF_MAX_DISTANCE, params)
 	local target = if result then math.max(result.Distance, DOF_MIN_FOCUS) else DOF_MAX_DISTANCE
 
 	local alpha = 1 - math.exp(-DOF_SMOOTHING * deltaTime)

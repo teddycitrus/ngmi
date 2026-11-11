@@ -28,7 +28,8 @@ local NPCDialogueChoice = Remotes:WaitForChild("NPCDialogueChoice") :: RemoteEve
 -- Types
 --------------------------------------------------------------------------------
 
-type NPCState = "IDLE" | "WALKING" | "TALKING" | "CORRUPTING" | "COWERING" | "DESPAWNED"
+-- CLAIMED: handed to NightEncounter for the Night 2 run-up cutscene
+type NPCState = "IDLE" | "WALKING" | "TALKING" | "CORRUPTING" | "COWERING" | "CLAIMED" | "DESPAWNED"
 
 type NPCRuntime = {
 	definition: NPCConfig.NPCDefinition,
@@ -836,8 +837,9 @@ local function onNIGHT2Start()
 				end
 			end
 
-			-- Move to hiding spot
-			task.spawn(function()
+			-- Move to hiding spot (held as the patrol thread so a claim can
+			-- cancel it mid-walk)
+			runtime.patrolThread = task.spawn(function()
 				if not runtime.model then
 					return
 				end
@@ -994,6 +996,50 @@ local function setupPhaseListeners()
 
 	local phaseChanged = getOrCreateBindable("PhaseChanged")
 	local corruptionTriggered = getOrCreateBindable("CorruptionTriggered")
+
+	-- Night 2 encounter bus (NightEncounter.server): the sane NPCs still
+	-- cowering can be listed, claimed for the run-up cutscene (this script
+	-- stops driving them), and removed once an NGMI has dragged them off.
+	local nightNPC = serverComm:FindFirstChild("NightNPC")
+	if not (nightNPC and nightNPC:IsA("BindableFunction")) then
+		nightNPC = Instance.new("BindableFunction")
+		nightNPC.Name = "NightNPC"
+		nightNPC.Parent = serverComm
+	end
+	;(nightNPC :: BindableFunction).OnInvoke = function(action: string, id: string?): any
+		if action == "list" then
+			local out = {}
+			for npcId, runtime in activeNPCs do
+				if runtime.isActive and runtime.state == "COWERING" and runtime.model then
+					table.insert(out, { id = npcId, model = runtime.model, name = string.match(runtime.definition.displayName, "^%S+") })
+				end
+			end
+			return out
+		end
+		local runtime = id and activeNPCs[id]
+		if not runtime then
+			return nil
+		end
+		if action == "claim" and runtime.state == "COWERING" and runtime.model then
+			stopPatrol(runtime)
+			stopBarks(runtime)
+			runtime.state = "CLAIMED"
+			local hum = runtime.model:FindFirstChildOfClass("Humanoid")
+			local root = runtime.model:FindFirstChild("HumanoidRootPart")
+			if root and root:IsA("BasePart") then
+				root.Anchored = false
+			end
+			if hum then
+				hum.AutoRotate = true
+			end
+			return runtime.model
+		elseif action == "remove" then
+			despawnNPC(runtime)
+			activeNPCs[id :: string] = nil
+			return true
+		end
+		return nil
+	end
 
 	phaseChanged.Event:Connect(function(phase: number)
 		if phase == 1 then

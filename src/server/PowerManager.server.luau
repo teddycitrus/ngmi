@@ -27,6 +27,7 @@ local TAGS = GameConfig.TAGS
 local NIGHT2 = GameConfig.Phase.NIGHT2
 
 local Flicker = require(script.Parent:WaitForChild("Power"):WaitForChild("Flicker"))
+local Lights = require(script.Parent:WaitForChild("Power"):WaitForChild("Lights"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local PanelRepaired = Remotes:WaitForChild("PanelRepaired") :: RemoteEvent
@@ -72,9 +73,19 @@ local panels: { PanelState } = {}
 local floorPanelCount: { [number]: number } = {}
 local floorFixedCount: { [number]: number } = {}
 local servers: { ServerState } = {}
+local serverConns: { RBXScriptConnection } = {}
+-- Colour each panel had before its first repair, so a new match starts it grey.
+local panelBaseColor: { [BasePart]: Color3 } = {}
 local panelsFixed = 0
 local serversFixed = 0
 local active = false
+
+-- Panel and rack highlights stay hidden until the night's opening encounter
+-- has played (NightEncounter sets NightReleased), so nothing glows through
+-- the walls during it.
+local function released(): boolean
+	return workspace:GetAttribute("NightReleased") == true
+end
 
 local function panelObjText(): string
 	return string.format("Restore the power: fix panels (%d/%d)", panelsFixed, #panels)
@@ -97,9 +108,6 @@ end
 --------------------------------------------------------------------------------
 -- Lights
 --------------------------------------------------------------------------------
-local OFF_COLOR = Color3.fromRGB(40, 42, 46)
-local BACKUP_COLOR = Color3.fromRGB(120, 135, 160)
-
 -- Even with a floor's power "restored", the grid is limping — only this fraction
 -- of that floor's lights actually come back on; the rest stay dark.
 local FLOOR_LIT_FRACTION = 0.35
@@ -123,58 +131,39 @@ local function gatherLights()
 	end
 end
 
-local function setLight(ls: LightState, mode: string)
-	if mode == "off" then
-		if ls.light then
-			ls.light.Enabled = false
-		end
-		ls.part.Material = Enum.Material.SmoothPlastic
-		ls.part.Color = OFF_COLOR
-		ls.level = 0
-		ls.on = false
-	elseif mode == "backup" then
-		if ls.light then
-			ls.light.Enabled = true
-			ls.light.Brightness = ls.brightness * 0.35
-		end
-		ls.part.Material = Enum.Material.Neon
-		ls.part.Color = BACKUP_COLOR
-		ls.level = 0.35
-		ls.on = true
-	else -- "floor": fuller (but still partial) restoration
-		if ls.light then
-			ls.light.Enabled = true
-			ls.light.Brightness = ls.brightness * 0.6
-		end
-		ls.part.Material = Enum.Material.Neon
-		ls.part.Color = ls.color
-		ls.level = 0.6
-		ls.on = true
-	end
-end
-
-local function restoreAllLights()
-	for _, ls in lights do
-		if ls.light then
-			ls.light.Enabled = true
-			ls.light.Brightness = ls.brightness
-		end
-		ls.part.Material = ls.material
-		ls.part.Color = ls.color
-		ls.level = 1
-		ls.on = true
-	end
-end
+local setLight = Lights.set
 
 --------------------------------------------------------------------------------
 -- Panels
 --------------------------------------------------------------------------------
+local function clearHighlights()
+	for _, panel in panels do
+		if panel.highlight then
+			panel.highlight:Destroy()
+			panel.highlight = nil
+		end
+	end
+end
+
 local function setupPanels()
+	clearHighlights()
 	table.clear(panels)
 	table.clear(floorPanelCount)
 	table.clear(floorFixedCount)
 	for _, p in CollectionService:GetTagged(TAGS.ELECTRICAL_PANEL) do
 		if p:IsA("BasePart") then
+			-- The map outlives a match: undo the previous night's repair.
+			local base = panelBaseColor[p]
+			if base then
+				p.Color = base
+			else
+				panelBaseColor[p] = p.Color
+			end
+			p:SetAttribute("IsRepaired", nil)
+			local panelPrompt = p:FindFirstChildOfClass("ProximityPrompt")
+			if panelPrompt then
+				panelPrompt.Enabled = true
+			end
 			local f = floorIndex(p.Position.Y)
 			local hl = Instance.new("Highlight")
 			hl.Name = "PanelHighlight"
@@ -183,20 +172,12 @@ local function setupPanels()
 			hl.FillTransparency = 0.45
 			hl.OutlineTransparency = 0
 			hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+			hl.Enabled = released()
 			hl.Adornee = p
 			hl.Parent = p
 			table.insert(panels, { part = p, floor = f, fixed = false, highlight = hl })
 			floorPanelCount[f] = (floorPanelCount[f] or 0) + 1
 			floorFixedCount[f] = floorFixedCount[f] or 0
-		end
-	end
-end
-
-local function clearHighlights()
-	for _, panel in panels do
-		if panel.highlight then
-			panel.highlight:Destroy()
-			panel.highlight = nil
 		end
 	end
 end
@@ -220,9 +201,34 @@ local function repairServer(srv: ServerState)
 	serversFixed += 1
 	fireObjective("repair_servers", serverObjText(), serversFixed >= #servers)
 	refreshNightSystems()
+
+	-- Every rack on this floor back online: the floor's lights come all the
+	-- way back and it is secured (NGMIController drives the NGMIs off it).
+	for _, other in servers do
+		if other.floor == srv.floor and not other.fixed then
+			return
+		end
+	end
+	Lights.restore(lights, srv.floor)
+	workspace:SetAttribute("FloorSecured" .. srv.floor, true)
+	print(string.format("[PowerManager] Floor %d servers all online: lights fully restored, floor secured.", srv.floor))
+end
+
+local function disconnectServers()
+	for _, conn in serverConns do
+		conn:Disconnect()
+	end
+	table.clear(serverConns)
 end
 
 local function setupServers()
+	disconnectServers()
+	for _, srv in servers do
+		if srv.highlight then
+			srv.highlight:Destroy()
+			srv.highlight = nil
+		end
+	end
 	table.clear(servers)
 	serversFixed = 0
 	for _, m in CollectionService:GetTagged(TAGS.SERVER_RACK) do
@@ -244,11 +250,14 @@ local function setupServers()
 					fixed = false,
 					highlight = nil,
 				}
-				prompt.Triggered:Connect(function()
-					if active and prompt.Enabled then
-						repairServer(srv)
-					end
-				end)
+				table.insert(
+					serverConns,
+					prompt.Triggered:Connect(function()
+						if active and prompt.Enabled then
+							repairServer(srv)
+						end
+					end)
+				)
 				table.insert(servers, srv)
 			end
 		end
@@ -273,6 +282,7 @@ local function enableFloorServers(f: number)
 				hl.FillTransparency = 0.5
 				hl.OutlineTransparency = 0
 				hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				hl.Enabled = released()
 				hl.Adornee = srv.model
 				hl.Parent = srv.model
 				srv.highlight = hl
@@ -422,6 +432,7 @@ local function onNight()
 	panelsFixed = 0
 	for f = 0, 2 do
 		workspace:SetAttribute("FloorPower" .. f, false)
+		workspace:SetAttribute("FloorSecured" .. f, nil)
 	end
 	gatherLights()
 	for _, ls in lights do
@@ -446,17 +457,34 @@ local function onLeaveNight()
 	end
 	active = false
 	clearHighlights()
+	disconnectServers()
 	for _, srv in servers do
+		srv.prompt.Enabled = false
 		if srv.highlight then
 			srv.highlight:Destroy()
 			srv.highlight = nil
 		end
 	end
-	restoreAllLights()
+	Lights.restore(lights)
 	for f = 0, 2 do
 		workspace:SetAttribute("FloorPower" .. f, true)
+		workspace:SetAttribute("FloorSecured" .. f, nil)
 	end
 end
+
+workspace:GetAttributeChangedSignal("NightReleased"):Connect(function()
+	local on = released()
+	for _, panel in panels do
+		if panel.highlight then
+			panel.highlight.Enabled = on
+		end
+	end
+	for _, srv in servers do
+		if srv.highlight then
+			srv.highlight.Enabled = on
+		end
+	end
+end)
 
 task.spawn(function()
 	local serverComm = ServerStorage:WaitForChild("ServerComm")

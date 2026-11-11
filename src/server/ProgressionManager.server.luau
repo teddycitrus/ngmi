@@ -76,7 +76,6 @@ local talkedCount = 0
 local itemsCollected = 0
 local floorsVisited: { [number]: boolean } = {}
 local floorsCount = 0
-local sawMonster = false
 local frozenPC: Model? = nil
 local deskFound: { [Player]: boolean } = {}
 local lastFired: { [string]: string } = {}
@@ -370,12 +369,10 @@ itemPickedUpBus.Event:Connect(function(_player: Player, _itemId: string?)
 	end
 end)
 
--- bonus: bathroom monster defeated (its model is destroyed once killed)
-CollectionService:GetInstanceAddedSignal("BathroomMonster"):Connect(function()
-	sawMonster = true
-end)
-CollectionService:GetInstanceRemovedSignal("BathroomMonster"):Connect(function()
-	if phase == DAY2 and sawMonster then
+-- bonus: bathroom monster defeated (QuestManager fires this on the kill only;
+-- the model also goes away when it sinks back at the end of Day 2)
+ensureBindable("PoopMonsterDefeated").Event:Connect(function()
+	if phase == DAY2 then
 		markDone("poop_monster")
 	end
 end)
@@ -506,10 +503,6 @@ phaseBus.Event:Connect(function(p: number)
 		task.delay(1.5, refresh) -- give the objectives panel a moment to load the new phase
 	elseif p == DAY2 then
 		active = true
-		sawMonster = false
-		for _, _m in CollectionService:GetTagged("BathroomMonster") do
-			sawMonster = true
-		end
 		spawnFrozenPC()
 		task.delay(1.5, refresh)
 	else

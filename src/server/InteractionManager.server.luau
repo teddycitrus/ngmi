@@ -17,6 +17,7 @@ local CollectionService = game:GetService("CollectionService")
 local ServerStorage = game:GetService("ServerStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local Closet = require(script.Parent:WaitForChild("Venue"):WaitForChild("Closet"))
 
 -- Remotes
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
@@ -224,77 +225,102 @@ local function handleDeskInteraction(player: Player, deskInstance: Instance)
 	end
 end
 
---- HidingSpot — hide/unhide during Night2
-local function handleHidingSpot(player: Player, spotInstance: Instance)
-	if hidingPlayers[player] then
-		-- Player is already hiding — unhide
-		hidingPlayers[player] = nil
-		player:SetAttribute("Hiding", nil)
+--- HidingSpot — hide/unhide during Night2.
+---
+--- Closets (spot attribute Closet, see Venue/Closet): the player is put
+--- inside facing out through the slats and the door swings shut; stepping
+--- out puts them in front of it and the door swings open again. The closet
+--- walls do the hiding, so nothing is made transparent. The spot's Occupied
+--- attribute tells clients (ClosetGlow) which closets are free.
+---
+--- Older spots (under a stall door, behind the stage) have no shell, so the
+--- character is faded for everyone and put back where it stood on leaving.
+local hideReturn: { [Player]: CFrame } = {}
 
-		-- Restore visibility
-		local character = player.Character
-		if character then
-			for _, part in character:GetDescendants() do
-				if part:IsA("BasePart") then
-					part.Transparency = 0
-				end
-			end
-			-- Restore humanoid root part transparency (always invisible)
-			local rootPart = character:FindFirstChild("HumanoidRootPart")
-			if rootPart and rootPart:IsA("BasePart") then
-				rootPart.Transparency = 1
-			end
+local function closetOf(spot: Instance): Model?
+	local m = spot.Parent
+	return if spot:GetAttribute("Closet") and m and m:IsA("Model") then m else nil
+end
+
+local function setFade(character: Model, t: number)
+	for _, part in character:GetDescendants() do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			part.Transparency = t
 		end
+	end
+end
 
-		HidingStateChanged:FireClient(player, {
-			isHiding = false,
-			spotName = spotInstance.Name,
-		})
+local function unhide(player: Player, spot: Instance)
+	hidingPlayers[player] = nil
+	player:SetAttribute("Hiding", nil)
+	spot:SetAttribute("Occupied", nil)
+	local back = hideReturn[player]
+	hideReturn[player] = nil
 
-		-- Broadcast to all clients for NGMI AI awareness
-		HidingStateChanged:FireAllClients({
-			playerId = player.UserId,
-			isHiding = false,
-		})
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local closet = closetOf(spot)
+	if character and root and root:IsA("BasePart") then
+		local exit = spot:GetAttribute("ExitCF")
+		if closet and typeof(exit) == "CFrame" then
+			character:PivotTo(exit)
+		elseif back then
+			character:PivotTo(back)
+		end
+		if not closet then
+			setFade(character, 0)
+		end
+		root.Anchored = false
+	end
+	if closet then
+		Closet.swing(closet, Closet.AJAR, 0.45)
+	end
+
+	HidingStateChanged:FireClient(player, { isHiding = false, spotName = spot.Name })
+	HidingStateChanged:FireAllClients({ playerId = player.UserId, isHiding = false })
+end
+
+local function hide(player: Player, spot: Instance)
+	for _, otherSpot in hidingPlayers do
+		if otherSpot == spot then
+			return -- taken
+		end
+	end
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not (character and root and root:IsA("BasePart") and spot:IsA("BasePart")) then
+		return
+	end
+
+	-- The attribute is what NGMIController and SurvivalManager read; only the
+	-- server can set it.
+	hidingPlayers[player] = spot
+	player:SetAttribute("Hiding", true)
+	spot:SetAttribute("Occupied", true)
+	hideReturn[player] = root.CFrame
+
+	-- Into the spot and held there, so walking keys can't slide them out of
+	-- cover; leaving releases the anchor.
+	local closet = closetOf(spot)
+	local inside = spot:GetAttribute("InsideCF")
+	character:PivotTo(if closet and typeof(inside) == "CFrame" then inside else spot.CFrame)
+	root.Anchored = true
+	if closet then
+		Closet.swing(closet, 0, 0.35)
 	else
-		-- Check if spot is already occupied
-		for _, otherSpot in hidingPlayers do
-			if otherSpot == spotInstance then
-				-- Spot is taken
-				return
-			end
-		end
+		setFade(character, 0.8)
+	end
 
-		-- Hide the player. The attribute is what NGMIController and
-		-- SurvivalManager read; only the server can set it.
-		hidingPlayers[player] = spotInstance
-		player:SetAttribute("Hiding", true)
+	HidingStateChanged:FireClient(player, { isHiding = true, spotName = spot.Name })
+	HidingStateChanged:FireAllClients({ playerId = player.UserId, isHiding = true })
+end
 
-		-- Make character semi-invisible
-		local character = player.Character
-		if character then
-			for _, part in character:GetDescendants() do
-				if part:IsA("BasePart") then
-					part.Transparency = 0.8
-				end
-			end
-		end
-
-		-- Move player to hiding position
-		if character and character.PrimaryPart and spotInstance:IsA("BasePart") then
-			character:PivotTo(spotInstance.CFrame)
-		end
-
-		HidingStateChanged:FireClient(player, {
-			isHiding = true,
-			spotName = spotInstance.Name,
-		})
-
-		-- Broadcast to all clients
-		HidingStateChanged:FireAllClients({
-			playerId = player.UserId,
-			isHiding = true,
-		})
+local function handleHidingSpot(player: Player, spotInstance: Instance)
+	local current = hidingPlayers[player]
+	if current then
+		unhide(player, current)
+	else
+		hide(player, spotInstance)
 	end
 end
 
@@ -333,7 +359,8 @@ local function handleElectricalPanel(player: Player, panelInstance: Instance)
 
 	-- Hand off to the client to run the wire-reconnection mini-game.
 	PanelPuzzleOpenedBus:Fire(player, panelInstance)
-	OpenPanelPuzzle:FireClient(player, { panelId = panelInstance.Name })
+	-- the part too, so the client can wait for PowerManager's IsRepaired on it
+	OpenPanelPuzzle:FireClient(player, { panelId = panelInstance.Name, panel = panelInstance })
 end
 
 --- Show or hide a quest item. Its decorative parts (chair legs, back) are
@@ -407,7 +434,15 @@ local function setupTaggedObject(instance: Instance, tag: string)
 	elseif tag == GameConfig.TAGS.HIDING_SPOT then
 		-- HidingSpot — hide interaction (Night2 only)
 		if instance:IsA("BasePart") then
-			local prompt = createPrompt(instance, "Hide", "Hiding Spot", 0.3)
+			local prompt = createPrompt(instance, "Hide", if instance:GetAttribute("Closet") then "Closet" else "Hiding Spot", 0.3)
+			instance:GetAttributeChangedSignal("Occupied"):Connect(function()
+				prompt.ActionText = if instance:GetAttribute("Occupied") then "Step out" else "Hide"
+			end)
+			-- Hiding spots sit under desks and behind stall doors, so the
+			-- furniture itself blocks line of sight and the prompt never
+			-- showed. The server still checks range on trigger.
+			prompt.RequiresLineOfSight = false
+			prompt.MaxActivationDistance = 6
 			registerPrompt(prompt, "hiding_spot", instance, function(plr: Player)
 				handleHidingSpot(plr, instance)
 			end)
@@ -499,26 +534,8 @@ local function onPhaseChanged(newPhase: number)
 
 	-- Clear hiding state on phase change (players auto-unhide)
 	if newPhase ~= 3 then -- not NIGHT2
-		for player, _ in hidingPlayers do
-			player:SetAttribute("Hiding", nil)
-			-- Restore visibility
-			local character = player.Character
-			if character then
-				for _, part in character:GetDescendants() do
-					if part:IsA("BasePart") then
-						part.Transparency = 0
-					end
-				end
-				local rootPart = character:FindFirstChild("HumanoidRootPart")
-				if rootPart and rootPart:IsA("BasePart") then
-					rootPart.Transparency = 1
-				end
-			end
-
-			HidingStateChanged:FireClient(player, {
-				isHiding = false,
-				spotName = "phase_change",
-			})
+		for player, spot in hidingPlayers do
+			unhide(player, spot)
 		end
 		table.clear(hidingPlayers)
 	end
@@ -579,6 +596,15 @@ HidingStateChanged.OnServerEvent:Connect(function(player: Player, data: any)
 end)
 
 Players.PlayerRemoving:Connect(function(player: Player)
+	local spot = hidingPlayers[player]
+	if spot then
+		spot:SetAttribute("Occupied", nil)
+		local closet = closetOf(spot)
+		if closet then
+			Closet.swing(closet, Closet.AJAR, 0.45)
+		end
+	end
+	hideReturn[player] = nil
 	hidingPlayers[player] = nil
 	codingPlayers[player] = nil
 end)

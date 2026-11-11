@@ -179,12 +179,14 @@ local function updateBody(body: Body, dt: number)
 	body.leanRoll += (targetRoll - body.leanRoll) * leanAlpha
 
 	pose(body, "Waist", CFrame.Angles(body.leanPitch - CROUCH_TORSO_TIP * c, 0, body.leanRoll))
-	pose(body, "LeftHip", CFrame.Angles(theta, 0, 0))
-	pose(body, "RightHip", CFrame.Angles(theta, 0, 0))
-	pose(body, "LeftKnee", CFrame.Angles(-2 * theta, 0, 0))
-	pose(body, "RightKnee", CFrame.Angles(-2 * theta, 0, 0))
-	pose(body, "LeftAnkle", CFrame.Angles(theta, 0, 0))
-	pose(body, "RightAnkle", CFrame.Angles(theta, 0, 0))
+	local fold = CFrame.Angles(theta, 0, 0)
+	local knee = CFrame.Angles(-2 * theta, 0, 0)
+	pose(body, "LeftHip", fold)
+	pose(body, "RightHip", fold)
+	pose(body, "LeftKnee", knee)
+	pose(body, "RightKnee", knee)
+	pose(body, "LeftAnkle", fold)
+	pose(body, "RightAnkle", fold)
 end
 
 RunService.RenderStepped:Connect(function(dt: number)

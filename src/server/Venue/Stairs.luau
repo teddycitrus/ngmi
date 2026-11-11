@@ -29,6 +29,8 @@ local HALF_RISE = Layout.LEVEL_H / 2
 local DEPTH = 9 -- flight width (along Z)
 local FLIGHT_Z = 5
 local DIV_DEPTH = (FLIGHT_Z * 2 - DEPTH) + 1.2
+local FLOOR_LANDING = 6 -- depth of the landing at each floor, from the shaft's west wall
+local TURN_LANDING = 6 -- depth of the half-way turn landing, from the east wall
 local RAIL_H = 3
 
 local CONCRETE = Color3.fromRGB(116, 116, 112)
@@ -120,16 +122,19 @@ function Stairs.build(root: Instance)
 	folder.Name = "Stairwell"
 	folder.Parent = root
 
-	local xW = SHAFT.xMin + 4
-	local xE = SHAFT.xMax - 5
+	-- Each flight runs exactly from one landing's edge to the next. They used
+	-- to run 4-5 studs into the landing slabs, so the last step met the landing
+	-- edge ~1.8 studs below its top: an unclimbable top stair.
+	local xW = SHAFT.xMin + FLOOR_LANDING
+	local xE = SHAFT.xMax - TURN_LANDING
 	for gap = 0, Layout.FLOORS - 2 do
 		local baseY = Layout.floorY(gap)
 		flight(folder, baseY, xW, xE, -FLIGHT_Z)
-		landing(folder, baseY + HALF_RISE, SHAFT.xMax - 10, SHAFT.xMax, SHAFT.xMax - 10, 1)
+		landing(folder, baseY + HALF_RISE, xE, SHAFT.xMax, xE, 1)
 		flight(folder, baseY + HALF_RISE, xE, xW, FLIGHT_Z)
-		landing(folder, Layout.floorY(gap + 1), SHAFT.xMin, SHAFT.xMin + 7, SHAFT.xMin + 7, -1)
+		landing(folder, Layout.floorY(gap + 1), SHAFT.xMin, xW, xW, -1)
 		-- spine wall the switchback wraps around, sealed full height
-		local divX0, divX1 = SHAFT.xMin + 7, SHAFT.xMax - 10
+		local divX0, divX1 = xW, xE
 		local spine = Kit.part(folder, "StairDivider", V(divX1 - divX0, Layout.LEVEL_H, DIV_DEPTH), V((divX0 + divX1) / 2, baseY + Layout.LEVEL_H / 2, 0), BLOCK, M.Brick)
 		spine.Name = "StairDivider"
 		Kit.trim(folder, "Stripe", V(divX1 - divX0 + 0.1, 1.0, DIV_DEPTH + 0.1), V((divX0 + divX1) / 2, baseY + HALF_RISE + 4.2, 0), Layout.ACCENT[gap + 2], M.SmoothPlastic)

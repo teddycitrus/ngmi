@@ -353,6 +353,12 @@ local function createTerminalFrame(): (ScreenGui, Frame, TextLabel)
     return codingGui, content, progressLabel
 end
 
+-- True while this task's terminal is the one on screen. Timers and delayed
+-- closes check it so a task that was closed and replaced can't act on the new one.
+local function isCurrent(gui: ScreenGui): boolean
+    return isOpen and codingGui == gui
+end
+
 -- ============================================================
 -- MINI-GAME 1: TYPING CHALLENGE
 -- ============================================================
@@ -531,7 +537,7 @@ local function startTypingChallenge()
             CodingTaskComplete:FireServer({ taskType = "typing", score = score })
 
             task.delay(2, function()
-                if isOpen then
+                if isCurrent(gui) then
                     closeCodingUI()
                 end
             end)
@@ -656,14 +662,14 @@ local function startBugFix()
             end
 
             task.delay(2.5, function()
-                if isOpen then closeCodingUI() end
+                if isCurrent(gui) then closeCodingUI() end
             end)
         end)
     end
 
     -- Timer countdown
     task.spawn(function()
-        while not solved and isOpen do
+        while not solved and isCurrent(gui) do
             local remaining = timeLimit - (tick() - startTime)
             if remaining <= 0 then
                 solved = true
@@ -671,7 +677,7 @@ local function startBugFix()
                 header.TextColor3 = Color3.fromRGB(255, 50, 50)
                 CodingTaskComplete:FireServer({ taskType = "bugfix", score = 0.1 })
                 task.delay(2, function()
-                    if isOpen then closeCodingUI() end
+                    if isCurrent(gui) then closeCodingUI() end
                 end)
                 break
             end
@@ -822,7 +828,7 @@ local function startDependencyHell()
                     CodingTaskComplete:FireServer({ taskType = "dependency", score = score })
 
                     task.delay(2, function()
-                        if isOpen then closeCodingUI() end
+                        if isCurrent(gui) then closeCodingUI() end
                     end)
                 end
             else
@@ -839,14 +845,14 @@ local function startDependencyHell()
 
     -- Timer
     task.spawn(function()
-        while matched < 4 and isOpen do
+        while matched < 4 and isCurrent(gui) do
             local remaining = timeLimit - (tick() - startTime)
             if remaining <= 0 then
                 header.Text = "✗ npm ERR! Install timed out."
                 header.TextColor3 = Color3.fromRGB(255, 50, 50)
                 CodingTaskComplete:FireServer({ taskType = "dependency", score = matched * 0.15 })
                 task.delay(2, function()
-                    if isOpen then closeCodingUI() end
+                    if isCurrent(gui) then closeCodingUI() end
                 end)
                 break
             end

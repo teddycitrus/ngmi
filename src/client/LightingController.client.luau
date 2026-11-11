@@ -30,6 +30,7 @@ local TweenService = game:GetService("TweenService")
 -- Shared lighting presets
 local LightingProfiles = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("LightingProfiles"))
 local VenueLights = require(script.Parent:WaitForChild("Lighting"):WaitForChild("VenueLights"))
+local Blackout = require(script.Parent:WaitForChild("Lighting"):WaitForChild("Blackout"))
 
 -- Remotes
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
@@ -332,6 +333,7 @@ local function onPhaseChanged(phase: number)
 	local night = phase == PHASE_NIGHT2
 	VenueLights.setCeiling(not night)
 	VenueLights.setEmergency(night)
+	Blackout.set(night)
 	if night then
 		runGlitchLoop()
 		VenueLights.startStrobe()

@@ -3,10 +3,12 @@
     ElectricalPanelUI.client.luau
     Wire puzzle mini-game for repairing sabotaged electrical panels during Night 2.
 
-    The player clicks a coloured circle on either side of the panel — a live wire
-    then springs from that circle and follows the cursor as a straight line. Clicking
-    the matching colour on the OPPOSITE side completes the connection; clicking the
-    wrong colour (or the same circle again) cancels it.
+    The player presses a coloured circle on either side of the panel and a live
+    wire follows the pointer. Either drag it onto the matching colour on the
+    OPPOSITE side and let go, or click the circle and then click the match.
+    The wrong colour cancels it, as does letting go of a drag on empty space.
+    While the panel is open the character can't move and prompts are off, so a
+    stray key can't walk you out of reach or reopen (and reset) the puzzle.
 ]]
 
 local Players = game:GetService("Players")
@@ -24,13 +26,19 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local CursorManager = require(Shared:WaitForChild("CursorManager"))
 local UITheme = require(Shared:WaitForChild("UITheme"))
 
--- The puzzle ScreenGui uses IgnoreGuiInset = true, so its AbsolutePosition space
--- starts at the true top-left of the screen. UserInputService:GetMouseLocation()
--- is measured from BELOW the topbar, so we add the inset to line the cursor up with
--- the wire endpoints — without this the drag line and the drop hit-test are off by
--- the topbar height and connections silently miss.
+-- Pointer positions, in the space the buttons are hit-tested and laid out in.
+-- Measured in Play with this IgnoreGuiInset ScreenGui and a 58 px inset: a
+-- release over a circle reported InputObject.Position at the circle's centre
+-- (AbsolutePosition + half its size), while GetMouseLocation() read 58 px
+-- lower. So input positions are used as they are, and GetMouseLocation() has
+-- the inset taken OFF. The old code added it on instead, leaving the live wire
+-- two topbar heights below the cursor.
+local lastTouch: Vector2? = nil
 local function mouseInGuiSpace(): Vector2
-    return UserInputService:GetMouseLocation() + GuiService:GetGuiInset()
+    return lastTouch or (UserInputService:GetMouseLocation() - GuiService:GetGuiInset())
+end
+local function inputInGuiSpace(input: InputObject): Vector2
+    return Vector2.new(input.Position.X, input.Position.Y)
 end
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
@@ -48,10 +56,10 @@ local isNight2 = false
 -- WIRE COLORS
 -- ============================================================
 local WIRE_COLORS = {
-    { name = "Red", color = Color3.fromRGB(220, 40, 40) },
-    { name = "Blue", color = Color3.fromRGB(40, 100, 220) },
-    { name = "Green", color = Color3.fromRGB(40, 200, 80) },
-    { name = "Yellow", color = Color3.fromRGB(230, 200, 40) },
+    { name = "Red", color = Color3.fromRGB(204, 70, 62) },
+    { name = "Blue", color = Color3.fromRGB(74, 124, 204) },
+    { name = "Green", color = Color3.fromRGB(84, 174, 108) },
+    { name = "Yellow", color = Color3.fromRGB(218, 182, 72) },
 }
 
 -- ============================================================
@@ -62,12 +70,18 @@ type Endpoint = { side: string, index: number, button: TextButton }
 local puzzleGui: ScreenGui? = nil
 local connectedCount = 0
 local currentPanelId: string? = nil
+local currentPanel: Instance? = nil -- the panel part, to confirm the server took the repair
+local submittedGui: ScreenGui? = nil -- the puzzle this client finished itself
 local rightEndpoints: { [number]: TextButton } = {}
 local leftEndpoints: { [number]: TextButton } = {}
 local connected: { [number]: boolean } = {} -- keyed by colour index
 local selected: Endpoint? = nil -- the circle the player clicked first
 local dragLine: Frame? = nil -- the live wire following the cursor
 local dragConn: RBXScriptConnection? = nil
+local pressedFrom: Endpoint? = nil -- the circle a press (possible drag) began on
+local pressedAt = Vector2.zero
+local controlsHeld = false
+local promptsWereEnabled = true
 
 -- Forward declarations: defined further down but used by handlers above them.
 local getNearestNGMIDistance: () -> number
@@ -78,6 +92,42 @@ local connectWire: (a: Endpoint, b: Endpoint) -> ()
 local onEndpointClicked: (ep: Endpoint) -> ()
 local puzzleComplete: () -> ()
 local closePuzzle: () -> ()
+
+local onPress: (ep: Endpoint, input: InputObject) -> ()
+local allEndpoints: { [GuiObject]: Endpoint } = {}
+
+local function isPointerInput(input: InputObject): boolean
+    return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+--- Freeze the character and switch off proximity prompts while the panel is
+--- open (and give both back on close).
+local function holdPlayer(hold: boolean)
+    if hold == controlsHeld then
+        return
+    end
+    controlsHeld = hold
+    local playerScripts = player:FindFirstChild("PlayerScripts")
+    local module = playerScripts and playerScripts:FindFirstChild("PlayerModule")
+    if module and module:IsA("ModuleScript") then
+        local ok, pm = pcall(require, module)
+        local controls = ok and pm and (pm :: any):GetControls()
+        if controls then
+            if hold then
+                controls:Disable()
+            else
+                controls:Enable()
+            end
+        end
+    end
+    local pps = game:GetService("ProximityPromptService")
+    if hold then
+        promptsWereEnabled = pps.Enabled
+        pps.Enabled = false
+    else
+        pps.Enabled = promptsWereEnabled
+    end
+end
 
 -- ============================================================
 -- LINE DRAWING UTILITY
@@ -152,7 +202,9 @@ local function createPuzzle(panelId: string)
     rightEndpoints = {}
     leftEndpoints = {}
     connected = {}
+    allEndpoints = {}
     selected = nil
+    pressedFrom = nil
     dragLine = nil
     dragConn = nil
 
@@ -160,79 +212,79 @@ local function createPuzzle(panelId: string)
     puzzleGui.Name = "ElectricalPanel"
     puzzleGui.DisplayOrder = 150
     puzzleGui.IgnoreGuiInset = true
+    -- Closed explicitly on death (CharacterRemoving below). Letting a respawn
+    -- wipe it skipped closePuzzle, so the cursor push leaked and the camera
+    -- stayed pulled out in third person.
+    puzzleGui.ResetOnSpawn = false
     puzzleGui.Parent = playerGui
+    holdPlayer(true)
 
-    -- Full panel background
+    -- Dim the world behind; the panel itself is a flat dark plate with a
+    -- hairline edge, in the HUD's type (UITheme).
     local bg = Instance.new("Frame")
     bg.Name = "Background"
     bg.Size = UDim2.new(1, 0, 1, 0)
-    bg.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
-    bg.BackgroundTransparency = 0.15
+    bg.BackgroundColor3 = Color3.fromRGB(6, 6, 8)
+    bg.BackgroundTransparency = 0.35
     bg.BorderSizePixel = 0
     bg.Parent = puzzleGui
 
-    -- Panel frame
     local panel = Instance.new("Frame")
     panel.Name = "Panel"
-    panel.Size = UDim2.new(0, 500, 0, 400)
-    panel.Position = UDim2.new(0.5, -250, 0.5, -200)
-    panel.BackgroundColor3 = Color3.fromRGB(50, 55, 60)
+    panel.AnchorPoint = Vector2.new(0.5, 0.5)
+    panel.Size = UDim2.new(0, 460, 0, 392)
+    panel.Position = UDim2.fromScale(0.5, 0.5)
+    panel.BackgroundColor3 = Color3.fromRGB(14, 15, 18)
     panel.BorderSizePixel = 0
     panel.Parent = puzzleGui
+    UITheme.corner(panel, 6)
+    UITheme.outline(panel, 0.86)
 
-    local panelCorner = Instance.new("UICorner")
-    panelCorner.CornerRadius = UDim.new(0, 12)
-    panelCorner.Parent = panel
+    local caption = UITheme.label(panel, { text = "ELECTRICAL PANEL", size = 11, font = UITheme.Font.Bold, color = UITheme.Color.Faint, shadow = false })
+    caption.Position = UDim2.fromOffset(24, 20)
+    caption.Size = UDim2.new(1, -120, 0, 14)
 
-    local panelStroke = Instance.new("UIStroke")
-    panelStroke.Color = Color3.fromRGB(100, 100, 110)
-    panelStroke.Thickness = 3
-    panelStroke.Parent = panel
-
-    -- Title
-    local title = Instance.new("TextLabel")
+    local title = UITheme.label(panel, { text = "Reconnect the circuits", size = 20, font = UITheme.Font.Bold, shadow = false })
     title.Name = "Title"
-    title.Size = UDim2.new(1, 0, 0, 40)
-    title.Position = UDim2.new(0, 0, 0, 10)
-    title.BackgroundTransparency = 1
-    title.Text = "⚡ ELECTRICAL PANEL - RECONNECT WIRES ⚡"
-    title.TextSize = 20
-    title.FontFace = UITheme.Font.Bold
-    title.TextColor3 = Color3.fromRGB(255, 200, 50)
-    title.Parent = panel
+    title.Position = UDim2.fromOffset(24, 36)
+    title.Size = UDim2.new(1, -120, 0, 24)
 
-    -- Close button
     local closeBtn = Instance.new("TextButton")
     closeBtn.Name = "CloseBtn"
-    closeBtn.Size = UDim2.new(0, 36, 0, 36)
-    closeBtn.Position = UDim2.new(1, -44, 0, 8)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-    closeBtn.Text = "✕"
-    closeBtn.TextSize = 18
-    closeBtn.FontFace = UITheme.Font.Bold
-    closeBtn.TextColor3 = Color3.new(1, 1, 1)
+    closeBtn.AnchorPoint = Vector2.new(1, 0)
+    closeBtn.Size = UDim2.new(0, 64, 0, 28)
+    closeBtn.Position = UDim2.new(1, -18, 0, 20)
+    closeBtn.BackgroundColor3 = UITheme.Color.Line
+    closeBtn.BackgroundTransparency = 0.96
+    closeBtn.AutoButtonColor = false
+    closeBtn.Text = "Close"
+    closeBtn.TextSize = 13
+    closeBtn.FontFace = UITheme.Font.Medium
+    closeBtn.TextColor3 = UITheme.Color.Dim
     closeBtn.Parent = panel
-
-    local closeBtnCorner = Instance.new("UICorner")
-    closeBtnCorner.CornerRadius = UDim.new(0, 8)
-    closeBtnCorner.Parent = closeBtn
-
+    UITheme.corner(closeBtn, 4)
+    UITheme.outline(closeBtn)
+    closeBtn.MouseEnter:Connect(function()
+        closeBtn.TextColor3 = UITheme.Color.Text
+        closeBtn.BackgroundTransparency = 0.9
+    end)
+    closeBtn.MouseLeave:Connect(function()
+        closeBtn.TextColor3 = UITheme.Color.Dim
+        closeBtn.BackgroundTransparency = 0.96
+    end)
     closeBtn.Activated:Connect(function()
         closePuzzle()
     end)
 
-    -- Wire area
     local wireArea = Instance.new("Frame")
     wireArea.Name = "WireArea"
-    wireArea.Size = UDim2.new(1, -40, 0, 280)
-    wireArea.Position = UDim2.new(0, 20, 0, 60)
-    wireArea.BackgroundColor3 = Color3.fromRGB(30, 32, 35)
+    wireArea.Size = UDim2.new(1, -48, 0, 256)
+    wireArea.Position = UDim2.new(0, 24, 0, 76)
+    wireArea.BackgroundColor3 = Color3.fromRGB(9, 10, 12)
     wireArea.BorderSizePixel = 0
     wireArea.Parent = panel
-
-    local wireCorner = Instance.new("UICorner")
-    wireCorner.CornerRadius = UDim.new(0, 8)
-    wireCorner.Parent = wireArea
+    UITheme.corner(wireArea, 4)
+    UITheme.outline(wireArea, 0.92)
 
     -- Clicking empty space in the wire area cancels the wire in progress.
     local cancelCatcher = Instance.new("TextButton")
@@ -256,126 +308,91 @@ local function createPuzzle(panelId: string)
         rightOrder[i], rightOrder[j] = rightOrder[j], rightOrder[i]
     end
 
-    -- Create wire endpoints
+    --- A terminal: a coloured stud in a dark ring, its colour named beside it.
+    local function terminal(name: string, index: number, xScale: number, xOffset: number, y: number, labelRight: boolean): TextButton
+        local wire = WIRE_COLORS[index]
+        local stud = Instance.new("TextButton")
+        stud.Name = name
+        stud.AnchorPoint = Vector2.new(0.5, 0.5)
+        stud.Size = UDim2.new(0, 26, 0, 26)
+        stud.Position = UDim2.new(xScale, xOffset, 0, y)
+        stud.BackgroundColor3 = wire.color
+        stud.AutoButtonColor = false
+        stud.Text = ""
+        stud.ZIndex = 2
+        stud.Parent = wireArea
+        UITheme.corner(stud, 13)
+        local ring = Instance.new("UIStroke")
+        ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        ring.Color = Color3.new(1, 1, 1)
+        ring.Thickness = 2
+        ring.Transparency = 0.8
+        ring.Parent = stud
+        local label = UITheme.label(wireArea, {
+            text = string.upper(wire.name),
+            size = 11,
+            font = UITheme.Font.Bold,
+            color = UITheme.Color.Dim,
+            alignX = if labelRight then Enum.TextXAlignment.Right else Enum.TextXAlignment.Left,
+            shadow = false,
+        })
+        label.AnchorPoint = Vector2.new(if labelRight then 1 else 0, 0.5)
+        label.Size = UDim2.new(0, 70, 0, 14)
+        label.Position = UDim2.new(xScale, xOffset + (if labelRight then -22 else 22), 0, y)
+        return stud
+    end
+
     for i = 1, 4 do
-        local wireColor = WIRE_COLORS[i]
-        local yPos = 20 + (i - 1) * 65
+        local y = 36 + (i - 1) * 61
 
-        -- Left endpoint (source)
-        local leftPoint = Instance.new("TextButton")
-        leftPoint.Name = "Left_" .. i
-        leftPoint.Size = UDim2.new(0, 50, 0, 50)
-        leftPoint.Position = UDim2.new(0, 15, 0, yPos)
-        leftPoint.BackgroundColor3 = wireColor.color
-        leftPoint.Text = ""
-        leftPoint.ZIndex = 2
-        leftPoint.Parent = wireArea
-
-        local leftCorner = Instance.new("UICorner")
-        leftCorner.CornerRadius = UDim.new(0.5, 0)
-        leftCorner.Parent = leftPoint
-
-        local leftStroke = Instance.new("UIStroke")
-        leftStroke.Color = Color3.new(1, 1, 1)
-        leftStroke.Thickness = 2
-        leftStroke.Transparency = 0.5
-        leftStroke.Parent = leftPoint
-
-        -- Label
-        local leftLabel = Instance.new("TextLabel")
-        leftLabel.Size = UDim2.new(0, 60, 0, 50)
-        leftLabel.Position = UDim2.new(0, 70, 0, yPos)
-        leftLabel.BackgroundTransparency = 1
-        leftLabel.Text = wireColor.name
-        leftLabel.TextSize = 16
-        leftLabel.FontFace = UITheme.Font.Bold
-        leftLabel.TextColor3 = wireColor.color
-        leftLabel.TextXAlignment = Enum.TextXAlignment.Left
-        leftLabel.Parent = wireArea
-
+        local leftPoint = terminal("Left_" .. i, i, 0, 30, y, false)
         leftEndpoints[i] = leftPoint
-
-        -- Click a left circle to start (or finish) a wire of this colour.
-        leftPoint.Activated:Connect(function()
-            onEndpointClicked({ side = "left", index = i, button = leftPoint })
+        local leftEp: Endpoint = { side = "left", index = i, button = leftPoint }
+        allEndpoints[leftPoint] = leftEp
+        leftPoint.InputBegan:Connect(function(input: InputObject)
+            onPress(leftEp, input)
         end)
 
         -- Right endpoint (target) - shuffled position
         local rightIndex = rightOrder[i]
-        local rightYPos = 20 + (i - 1) * 65
-
-        local rightPoint = Instance.new("TextButton")
-        rightPoint.Name = "Right_" .. rightIndex
-        rightPoint.Size = UDim2.new(0, 50, 0, 50)
-        rightPoint.Position = UDim2.new(1, -65, 0, rightYPos)
-        rightPoint.BackgroundColor3 = WIRE_COLORS[rightIndex].color
-        rightPoint.Text = ""
-        rightPoint.ZIndex = 2
-        rightPoint.Parent = wireArea
-
-        local rightCorner = Instance.new("UICorner")
-        rightCorner.CornerRadius = UDim.new(0.5, 0)
-        rightCorner.Parent = rightPoint
-
-        local rightStroke = Instance.new("UIStroke")
-        rightStroke.Color = Color3.new(1, 1, 1)
-        rightStroke.Thickness = 2
-        rightStroke.Transparency = 0.5
-        rightStroke.Parent = rightPoint
-
-        local rightLabel = Instance.new("TextLabel")
-        rightLabel.Size = UDim2.new(0, 60, 0, 50)
-        rightLabel.Position = UDim2.new(1, -130, 0, rightYPos)
-        rightLabel.BackgroundTransparency = 1
-        rightLabel.Text = WIRE_COLORS[rightIndex].name
-        rightLabel.TextSize = 16
-        rightLabel.FontFace = UITheme.Font.Bold
-        rightLabel.TextColor3 = WIRE_COLORS[rightIndex].color
-        rightLabel.TextXAlignment = Enum.TextXAlignment.Right
-        rightLabel.Parent = wireArea
-
+        local rightPoint = terminal("Right_" .. rightIndex, rightIndex, 1, -30, y, true)
         rightEndpoints[rightIndex] = rightPoint
-
-        -- Click a right circle to start (or finish) a wire of this colour.
-        rightPoint.Activated:Connect(function()
-            onEndpointClicked({ side = "right", index = rightIndex, button = rightPoint })
+        local rightEp: Endpoint = { side = "right", index = rightIndex, button = rightPoint }
+        allEndpoints[rightPoint] = rightEp
+        rightPoint.InputBegan:Connect(function(input: InputObject)
+            onPress(rightEp, input)
         end)
     end
 
-    -- Instruction hint
-    local hint = Instance.new("TextLabel")
+    local hint = UITheme.label(panel, {
+        text = "Drag each wire to the terminal of the same colour.",
+        size = 13,
+        font = UITheme.Font.Regular,
+        color = UITheme.Color.Faint,
+        shadow = false,
+    })
     hint.Name = "Hint"
-    hint.Size = UDim2.new(1, 0, 0, 22)
-    hint.Position = UDim2.new(0, 0, 1, -58)
-    hint.BackgroundTransparency = 1
-    hint.Text = "Click a circle, then click the same colour on the other side"
-    hint.TextSize = 14
-    hint.FontFace = UITheme.Font.Regular
-    hint.TextColor3 = Color3.fromRGB(180, 180, 190)
-    hint.Parent = panel
+    hint.Position = UDim2.new(0, 24, 1, -46)
+    hint.Size = UDim2.new(1, -48, 0, 16)
 
-    -- NGMI warning label
-    local warningLabel = Instance.new("TextLabel")
+    -- NGMI proximity warning, quiet until it matters
+    local warningLabel = UITheme.label(panel, { size = 13, font = UITheme.Font.Medium, color = UITheme.Color.Danger, shadow = false })
     warningLabel.Name = "Warning"
-    warningLabel.Size = UDim2.new(1, 0, 0, 30)
-    warningLabel.Position = UDim2.new(0, 0, 1, -35)
-    warningLabel.BackgroundTransparency = 1
-    warningLabel.Text = ""
-    warningLabel.TextSize = 16
-    warningLabel.FontFace = UITheme.Font.Bold
-    warningLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
-    warningLabel.Parent = panel
+    warningLabel.Position = UDim2.new(0, 24, 1, -28)
+    warningLabel.Size = UDim2.new(1, -48, 0, 16)
 
-    -- NGMI proximity warning loop
+    -- Bound to this panel's own gui, so a quick close and reopen can't leave
+    -- the old loop running alongside the new one.
+    local thisGui = puzzleGui
     task.spawn(function()
-        while puzzleGui and puzzleGui.Parent do
+        while thisGui and thisGui.Parent do
             local dist = getNearestNGMIDistance()
             if dist < 20 and warningLabel.Parent then
-                warningLabel.Text = "⚠️ WARNING: HOSTILE DETECTED NEARBY ⚠️"
+                warningLabel.Text = "Something is right outside."
                 warningLabel.TextTransparency = 0
             elseif dist < 35 and warningLabel.Parent then
-                warningLabel.Text = "⚠️ Movement detected in hallway..."
-                warningLabel.TextTransparency = 0.3
+                warningLabel.Text = "You hear movement in the hall."
+                warningLabel.TextTransparency = 0.35
             elseif warningLabel.Parent then
                 warningLabel.Text = ""
             end
@@ -414,8 +431,8 @@ local function flashWrong()
     if not panel then return end
     local flash = Instance.new("Frame")
     flash.Size = UDim2.new(1, 0, 1, 0)
-    flash.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-    flash.BackgroundTransparency = 0.7
+    flash.BackgroundColor3 = Color3.fromRGB(226, 72, 72)
+    flash.BackgroundTransparency = 0.85
     flash.BorderSizePixel = 0
     flash.ZIndex = 10
     flash.Parent = panel
@@ -432,8 +449,8 @@ function highlightSelection()
             local stroke = btn:FindFirstChildOfClass("UIStroke")
             if stroke then
                 local isSel = selected ~= nil and selected.index == idx and selected.side == side
-                stroke.Thickness = isSel and 4 or 2
-                stroke.Transparency = isSel and 0 or 0.5
+                stroke.Thickness = isSel and 3 or 2
+                stroke.Transparency = isSel and 0.1 or 0.8
             end
         end
     end
@@ -473,7 +490,7 @@ function startDrag(ep: Endpoint)
     selected = ep
     local origin = endpointCenter(ep.button, wireArea)
 
-    local line = drawLine(wireArea, origin, origin, WIRE_COLORS[ep.index].color, 6)
+    local line = drawLine(wireArea, origin, origin, WIRE_COLORS[ep.index].color, 4)
     line.Name = "DragLine"
     line.BackgroundTransparency = 0.15
     line.ZIndex = 1 -- under the circles, over the cancel-catcher
@@ -499,7 +516,7 @@ function connectWire(a: Endpoint, b: Endpoint)
     local from = endpointCenter(a.button, wireArea)
     local to = endpointCenter(b.button, wireArea)
 
-    local line = drawLine(wireArea, from, to, WIRE_COLORS[a.index].color, 6)
+    local line = drawLine(wireArea, from, to, WIRE_COLORS[a.index].color, 4)
     line.Name = "Connected_" .. a.index
     line.ZIndex = 1
 
@@ -507,7 +524,8 @@ function connectWire(a: Endpoint, b: Endpoint)
     local sparkFlash = Instance.new("Frame")
     sparkFlash.Size = UDim2.new(0, 30, 0, 30)
     sparkFlash.Position = UDim2.new(0, to.X - 15, 0, to.Y - 15)
-    sparkFlash.BackgroundColor3 = Color3.fromRGB(255, 255, 200)
+    sparkFlash.BackgroundColor3 = Color3.fromRGB(255, 246, 220)
+    sparkFlash.BackgroundTransparency = 0.4
     sparkFlash.BorderSizePixel = 0
     sparkFlash.ZIndex = 3
     sparkFlash.Parent = wireArea
@@ -570,6 +588,68 @@ function onEndpointClicked(ep: Endpoint)
     end
 end
 
+--- The circle under a GUI-space point, if any.
+local function endpointAt(pos: Vector2): Endpoint?
+    for button, ep in allEndpoints do
+        local a, size = button.AbsolutePosition, button.AbsoluteSize
+        local c = a + size / 2
+        -- circles: within the radius, plus a little slack for a fast release
+        if (pos - c).Magnitude <= size.X / 2 + 8 then
+            return ep
+        end
+    end
+    return nil
+end
+
+--- A press on a circle. With a wire already live from the other side it
+--- completes (click, then click); otherwise a wire starts here and either
+--- follows a drag or waits for the second click.
+function onPress(ep: Endpoint, input: InputObject)
+    if not isPointerInput(input) or connected[ep.index] then return end
+    if input.UserInputType == Enum.UserInputType.Touch then
+        lastTouch = inputInGuiSpace(input)
+    end
+    if selected and selected.side ~= ep.side then
+        pressedFrom = nil
+        onEndpointClicked(ep)
+        return
+    end
+    pressedFrom = ep
+    pressedAt = inputInGuiSpace(input)
+    if not (selected and selected.index == ep.index and selected.side == ep.side) then
+        startDrag(ep)
+    end
+end
+
+-- Releases happen wherever the pointer is, so they are caught globally. A
+-- Button's Activated only fires when press and release land on the SAME
+-- button, which is why dragging a wire onto its match used to do nothing.
+UserInputService.InputEnded:Connect(function(input: InputObject)
+    if not (puzzleGui and pressedFrom and isPointerInput(input)) then return end
+    local from = pressedFrom
+    pressedFrom = nil
+    local at = inputInGuiSpace(input)
+    local target = endpointAt(at)
+    if target and target.side ~= from.side then
+        onEndpointClicked(target)
+    elseif not target and (at - pressedAt).Magnitude > 12 then
+        clearSelection() -- dragged and let go on nothing
+    end
+    -- released on the circle it started from: a click, the wire stays live
+end)
+
+UserInputService.InputChanged:Connect(function(input: InputObject)
+    if input.UserInputType == Enum.UserInputType.Touch and puzzleGui then
+        lastTouch = inputInGuiSpace(input)
+    elseif input.UserInputType == Enum.UserInputType.MouseMovement then
+        lastTouch = nil
+    end
+end)
+
+player.CharacterRemoving:Connect(function()
+    closePuzzle()
+end)
+
 -- ============================================================
 -- PUZZLE COMPLETION
 -- ============================================================
@@ -578,8 +658,10 @@ function puzzleComplete()
 
     clearSelection()
 
-    -- Fire server
     PanelRepaired:FireServer(currentPanelId)
+    local panelPart = currentPanel
+    local thisGui = puzzleGui
+    submittedGui = thisGui
 
     -- Success UI
     local panel = puzzleGui:FindFirstChild("Panel") :: Frame?
@@ -587,8 +669,8 @@ function puzzleComplete()
         -- Green flash
         local flash = Instance.new("Frame")
         flash.Size = UDim2.new(1, 0, 1, 0)
-        flash.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
-        flash.BackgroundTransparency = 0.5
+        flash.BackgroundColor3 = UITheme.Color.Good
+        flash.BackgroundTransparency = 0.82
         flash.BorderSizePixel = 0
         flash.ZIndex = 10
         flash.Parent = panel
@@ -598,24 +680,43 @@ function puzzleComplete()
         }):Play()
 
         -- Success text
-        local successLabel = Instance.new("TextLabel")
-        successLabel.Size = UDim2.new(1, 0, 0.3, 0)
-        successLabel.Position = UDim2.new(0, 0, 0.35, 0)
-        successLabel.BackgroundTransparency = 1
-        successLabel.Text = "⚡ POWER RESTORED ⚡"
-        successLabel.TextSize = 36
-        successLabel.FontFace = UITheme.Font.Bold
-        successLabel.TextColor3 = Color3.fromRGB(100, 255, 150)
-        successLabel.TextStrokeTransparency = 0.3
-        successLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+        local successLabel = UITheme.label(panel, {
+            text = "Restoring power",
+            size = 22,
+            font = UITheme.Font.Bold,
+            color = UITheme.Color.Text,
+            alignX = Enum.TextXAlignment.Center,
+        })
+        successLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+        successLabel.Position = UDim2.fromScale(0.5, 0.5)
+        successLabel.Size = UDim2.new(1, -48, 0, 30)
         successLabel.ZIndex = 11
-        successLabel.Parent = panel
-    end
 
-    -- Auto-close after 1.5s
-    task.delay(1.5, function()
-        closePuzzle()
-    end)
+        -- Only claim success once the server has actually repaired the panel
+        -- (it refuses a report from too far away, or after the puzzle was
+        -- reopened). It used to say POWER RESTORED regardless.
+        task.spawn(function()
+            local t0 = os.clock()
+            while panelPart and not panelPart:GetAttribute("IsRepaired") and os.clock() - t0 < 3 do
+                task.wait(0.1)
+            end
+            if not successLabel.Parent then return end
+            if not panelPart or panelPart:GetAttribute("IsRepaired") then
+                successLabel.Text = "Power restored"
+                successLabel.TextColor3 = UITheme.Color.Good
+            else
+                successLabel.Text = "The panel didn't take it. Try again."
+                successLabel.TextSize = 18
+                successLabel.TextColor3 = UITheme.Color.Warn
+            end
+            task.wait(1.5)
+            if puzzleGui == thisGui then
+                closePuzzle()
+            end
+        end)
+    else
+        task.delay(1.5, closePuzzle)
+    end
 end
 
 function closePuzzle()
@@ -628,15 +729,19 @@ function closePuzzle()
     end
     dragLine = nil
     selected = nil
+    pressedFrom = nil
+    lastTouch = nil
 
     if puzzleGui then
         puzzleGui:Destroy()
         puzzleGui = nil
     end
     currentPanelId = nil
+    currentPanel = nil
 
     if wasOpen then
         CursorManager.pop()
+        holdPlayer(false)
     end
 end
 
@@ -661,9 +766,49 @@ end)
 -- The server opens the puzzle for us (after its wall / proximity checks) by firing
 -- OpenPanelPuzzle — see InteractionManager.handleElectricalPanel. Driving it from
 -- the server keeps the through-wall guard authoritative.
-OpenPanelPuzzle.OnClientEvent:Connect(function(data: { panelId: string })
+OpenPanelPuzzle.OnClientEvent:Connect(function(data: { panelId: string, panel: Instance? })
     if isNight2 and data and data.panelId then
         createPuzzle(data.panelId)
+        currentPanel = data.panel
+        local panelPart = data.panel
+        local gui = puzzleGui
+        if not (panelPart and gui) then
+            return
+        end
+        -- Panels are shared: if a teammate fixes this one while we're still
+        -- wiring it, say so and close instead of leaving a dead puzzle open.
+        local conn: RBXScriptConnection
+        conn = panelPart:GetAttributeChangedSignal("IsRepaired"):Connect(function()
+            if not panelPart:GetAttribute("IsRepaired") then
+                return
+            end
+            conn:Disconnect()
+            if puzzleGui ~= gui or submittedGui == gui then
+                return
+            end
+            local frame = gui:FindFirstChild("Panel")
+            if frame then
+                local note = UITheme.label(frame, {
+                    text = "A teammate fixed this panel",
+                    size = 22,
+                    font = UITheme.Font.Bold,
+                    color = UITheme.Color.Good,
+                    alignX = Enum.TextXAlignment.Center,
+                })
+                note.AnchorPoint = Vector2.new(0.5, 0.5)
+                note.Position = UDim2.fromScale(0.5, 0.5)
+                note.Size = UDim2.new(1, -48, 0, 30)
+                note.ZIndex = 11
+            end
+            task.delay(1.2, function()
+                if puzzleGui == gui then
+                    closePuzzle()
+                end
+            end)
+        end)
+        gui.Destroying:Connect(function()
+            conn:Disconnect()
+        end)
     end
 end)
 

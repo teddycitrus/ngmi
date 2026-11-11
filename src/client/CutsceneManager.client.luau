@@ -22,7 +22,10 @@ local RigPose = require(Shared:WaitForChild("RigPose"))
 local CutsceneActors = require(Shared:WaitForChild("CutsceneActors"))
 local NGMIMutation = require(Shared:WaitForChild("NGMIMutation"))
 local NGMIChoreo = require(Shared:WaitForChild("NGMIChoreo"))
+local NGMIFit = require(Shared:WaitForChild("NGMIFit"))
 local OpeningCinematic = require(Shared:WaitForChild("OpeningCinematic"))
+local Lounge = require(script.Parent:WaitForChild("Cutscene"):WaitForChild("Lounge"))
+local WorldIndex = require(script.Parent:WaitForChild("Cutscene"):WaitForChild("WorldIndex"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
@@ -102,21 +105,6 @@ local function getCutsceneBlur(): BlurEffect
     b.Parent = Lighting
     cutsceneBlur = b
     return b
-end
-
---- Ease the camera along a path to `goal` over `duration`.
---- Cubic InOut is the house easing for cutscene moves: it leaves and arrives
---- almost stationary, which reads as a camera operator rather than a lerp.
-local function cameraMove(goal: CFrame, duration: number, direction: Enum.EasingDirection?): Tween
-    camera.CameraType = Enum.CameraType.Scriptable
-    local info = TweenInfo.new(
-        duration,
-        Enum.EasingStyle.Cubic,
-        direction or Enum.EasingDirection.InOut
-    )
-    local tween = TweenService:Create(camera, info, { CFrame = goal })
-    tween:Play()
-    return tween
 end
 
 --- Lens pull. A slow push-in tightens the frame; a fast one snaps focus onto a
@@ -258,12 +246,14 @@ local function playSleepCutscene()
     botBar.Parent = gui
 
     local thought = Instance.new("TextLabel")
-    thought.AnchorPoint = Vector2.new(0.5, 0.5)
-    thought.Size = UDim2.new(0.72, 0, 0, 140)
-    thought.Position = UDim2.new(0.5, 0, 0.62, 0)
+    -- the player muttering to themselves: small, low on the screen
+    thought.AnchorPoint = Vector2.new(0.5, 1)
+    thought.Size = UDim2.new(0.6, 0, 0, 48)
+    thought.Position = UDim2.new(0.5, 0, 0.92, 0)
+    thought.TextYAlignment = Enum.TextYAlignment.Bottom
     thought.BackgroundTransparency = 1
     thought.FontFace = UITheme.Font.Regular
-    thought.TextSize = 26
+    thought.TextSize = 18
     thought.TextColor3 = Color3.fromRGB(210, 210, 225)
     thought.TextStrokeTransparency = 0.6
     thought.TextWrapped = true
@@ -321,7 +311,7 @@ local function playSleepCutscene()
     setLids(0.8, 0.15); task.wait(0.16)  -- blink
     setLids(0, 0.4); task.wait(0.45)     -- fully open
 
-    showThought("Morning already? Right — no time to waste. Let's get to work.", 2.6)
+    showThought("Morning already? Right, no time to waste. Let's get to work.", 2.6)
 
     -- (4) Resume gameplay (now in DAY2).
     if humanoid then humanoid.WalkSpeed = origWalk end
@@ -408,7 +398,7 @@ local function playBadEnding()
     bg.BackgroundColor3 = Color3.new(0, 0, 0)
 
     -- Glitch flashes
-    for i = 1, 8 do
+    for _ = 1, 8 do
         bg.BackgroundTransparency = 0.3
         bg.BackgroundColor3 = Color3.fromRGB(
             math.random(100, 255),
@@ -659,9 +649,10 @@ end
 
 -- ============================================================
 -- NIGHT TRANSITION CUTSCENE (Day 2 → Night 2)
--- The player dozes off; a montage of real avatar hackers melting down and
--- mutating into NGMIs, a storm kills the power, and the player jolts awake on
--- the floor for the final night. Self-contained & client-local: it clones real
+-- The player dozes off. In a lounge, three hackers: one breaks and turns
+-- NGMI, goes for the one at the next table, and the third jumps up to watch
+-- and turns too. A storm kills the power, and the player jolts awake on the
+-- floor for the final night. Self-contained & client-local: it clones real
 -- venue rigs into an off-map set, poses them via Motor6D, films hard cuts, and
 -- tears the set down. The server holds the phase until this plays out.
 -- ============================================================
@@ -689,8 +680,10 @@ local function playNightTransition()
     caption.TextColor3 = Color3.fromRGB(245,245,245); caption.TextStrokeTransparency = 0.5; caption.TextWrapped = true
     caption.TextYAlignment = Enum.TextYAlignment.Bottom; caption.TextTransparency = 1; caption.ZIndex = 10; caption.Text = ""; caption.Parent = gui
     local thought = Instance.new("TextLabel")
-    thought.AnchorPoint = Vector2.new(0.5,0.5); thought.Size = UDim2.new(0.72,0,0,140); thought.Position = UDim2.new(0.5,0,0.5,0)
-    thought.BackgroundTransparency = 1; thought.FontFace = UITheme.Font.Regular; thought.TextSize = 26
+    -- the player muttering to themselves: small, low on the screen
+    thought.AnchorPoint = Vector2.new(0.5,1); thought.Size = UDim2.new(0.6,0,0,48); thought.Position = UDim2.new(0.5,0,0.92,0)
+    thought.TextYAlignment = Enum.TextYAlignment.Bottom
+    thought.BackgroundTransparency = 1; thought.FontFace = UITheme.Font.Regular; thought.TextSize = 18
     thought.TextColor3 = Color3.fromRGB(205,205,220); thought.TextStrokeTransparency = 0.6; thought.TextWrapped = true
     thought.TextTransparency = 1; thought.ZIndex = 10; thought.Text = ""; thought.Parent = gui
     local flash = Instance.new("Frame")
@@ -739,8 +732,19 @@ local function playNightTransition()
     end
 
     local BASE = Vector3.new(8000, 400, 8000)
-    local DARK = Color3.fromRGB(14, 13, 18)
     local set = Instance.new("Folder"); set.Name = "NightTransitionSet"; set.Parent = workspace
+
+    -- The strike that kills the power: a crack on the flash and a thunderclap
+    -- over the shake and the cut to black. Made now so they have loaded by then.
+    local function stormSound(id: string, volume: number): Sound
+        local s = Instance.new("Sound")
+        s.SoundId = id
+        s.Volume = volume
+        s.Parent = game:GetService("SoundService")
+        return s
+    end
+    local strikeCrack = stormSound("rbxassetid://12222019", 1) -- Roblox HalloweenLightning
+    local thunderclap = stormSound("rbxassetid://12222030", 1) -- Roblox HalloweenThunder
 
     local function newPart(name: string, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material?): Part
         local p = Instance.new("Part")
@@ -753,21 +757,48 @@ local function playNightTransition()
     -- breakdowns, the turns and the exit shamble are in Shared.NGMIChoreo, and
     -- the mutation itself is Shared.NGMIMutation, the same one the gameplay
     -- NGMIs are built with.
-    local sources = CutsceneActors.gatherSources({ "NPCs", "AmbientPeople" })
+    -- Cast from the server's pool of crowd hackers (ReplicatedStorage.CutsceneCast),
+    -- falling back to the venue's people if it hasn't arrived.
+    local sources: { Model } = {}
+    local pool = ReplicatedStorage:FindFirstChild("CutsceneCast")
+    if pool then
+        for _, m in pool:GetChildren() do
+            if m:IsA("Model") and m:FindFirstChild("UpperTorso") then table.insert(sources, m) end
+        end
+    end
+    if #sources == 0 then
+        sources = CutsceneActors.gatherSources({ "AmbientPeople", "NPCs" })
+    end
+    -- three different people, not the same body twice
+    for i = #sources, 2, -1 do
+        local j = math.random(i)
+        sources[i], sources[j] = sources[j], sources[i]
+    end
+    -- Each actor turns a different way (Shared.NGMIStyles), dealt in a shuffled order.
+    local castStyles = table.clone(NGMIMutation.STYLES)
+    for i = #castStyles, 2, -1 do
+        local j = math.random(i)
+        castStyles[i], castStyles[j] = castStyles[j], castStyles[i]
+    end
+    local styleCount = 0
     local function makeActor(cf: CFrame, role: string, seated: boolean): any
         local actor: any = CutsceneActors.spawn({
-            source = if #sources > 0 then sources[math.random(#sources)] else nil,
+            source = if #sources > 0 then sources[styleCount % #sources + 1] else nil,
             parent = set,
             cframe = cf,
             repaint = true,
             stripClothes = true,
         })
         if not actor then return nil end
+        -- arms in, and the contacts (hands to the mouth, face in the hands)
+        -- solved on this body
+        actor.fit = NGMIFit.prepare(actor.rig)
         actor.role = role
         actor.seated = seated
         actor.mode = "breakdown"
         actor.modeStart = 0
-        actor.twist = 0
+        styleCount += 1
+        actor.style = NGMIMutation.style(castStyles[(styleCount - 1) % #castStyles + 1])
         return actor
     end
 
@@ -783,19 +814,6 @@ local function playNightTransition()
         end
     end
 
-    local function addDesk(actorPos: Vector3, code: string)
-        newPart("Desk", Vector3.new(4.4,0.2,2), CFrame.new(actorPos + Vector3.new(0,-0.25,1.7)), Color3.fromRGB(58,53,62))
-        local screenPos = actorPos + Vector3.new(0,0.5,2.5)
-        local screen = newPart("Screen", Vector3.new(2.6,1.6,0.1), CFrame.lookAt(screenPos, actorPos + Vector3.new(0,0.4,0)), Color3.fromRGB(16,12,16), Enum.Material.Neon)
-        local sg = Instance.new("SurfaceGui"); sg.Face = Enum.NormalId.Front; sg.CanvasSize = Vector2.new(320,200); sg.Parent = screen
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundColor3 = Color3.fromRGB(10,6,9); lbl.FontFace = UITheme.Font.Mono
-        lbl.TextColor3 = Color3.fromRGB(255,70,70); lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextYAlignment = Enum.TextYAlignment.Top
-        lbl.TextWrapped = true; lbl.TextSize = 15; lbl.Text = code; lbl.Parent = sg
-        -- In a dark room the monitor is the key light on the actor's face, so it
-        -- carries more than it did when the room was flat-lit.
-        local face = Instance.new("PointLight"); face.Color = Color3.fromRGB(255,120,110); face.Brightness = 1; face.Range = 10; face.Parent = screen
-    end
 
     local function headOf(rig: any): BasePart?
         if not rig then return nil end
@@ -835,81 +853,18 @@ local function playNightTransition()
         end)
     end
 
-    -- A lab room that matches the venue: light walls, wood floor, warm ceiling
-    -- lights, desks + monitors, a window, and a doorway through to a short
-    -- hallway the mutated hackers shamble out into.
-    local WALL = Color3.fromRGB(216, 216, 222)
-    local FLOORC = Color3.fromRGB(139, 90, 43)
-    local CEIL = Color3.fromRGB(232, 232, 236)
+    -- A venue lounge at 3am (Cutscene/Lounge): carpet, panelled walls, the
+    -- couch corner, vending machines and laptop tables, from the venue's own
+    -- furniture templates. Ceiling panels at half strength, one flickering.
     local centerX = BASE.X
     local floorTop = BASE.Y + 0.2
     local standY = floorTop + standLift
-    -- Thighs land ~1.4 studs off the floor, just under the desk tops.
+    -- Thighs land ~1.4 studs off the floor, on the lounge chairs.
     local seatY = floorTop + 2.85
-    local backZ = BASE.Z - 20
-    local frontZ = BASE.Z + 20
-    local wallY = BASE.Y + 6
-    newPart("Floor", Vector3.new(50, 0.4, 40), CFrame.new(centerX, floorTop - 0.2, BASE.Z), FLOORC, Enum.Material.WoodPlanks)
-    newPart("Ceiling", Vector3.new(50, 0.4, 40), CFrame.new(centerX, BASE.Y + 12, BASE.Z), CEIL)
-    newPart("WallL", Vector3.new(0.6, 12, 40), CFrame.new(centerX - 25, wallY, BASE.Z), WALL)
-    newPart("WallR", Vector3.new(0.6, 12, 40), CFrame.new(centerX + 25, wallY, BASE.Z), WALL)
-    newPart("WallF", Vector3.new(50, 12, 0.6), CFrame.new(centerX, wallY, frontZ), WALL)
-    newPart("WallB1", Vector3.new(21, 12, 0.6), CFrame.new(centerX - 14.5, wallY, backZ), WALL)
-    newPart("WallB2", Vector3.new(21, 12, 0.6), CFrame.new(centerX + 14.5, wallY, backZ), WALL)
-    newPart("WallBTop", Vector3.new(8, 3, 0.6), CFrame.new(centerX, BASE.Y + 10.5, backZ), WALL)
-    newPart("Window", Vector3.new(0.3, 5, 8), CFrame.new(centerX + 24.7, BASE.Y + 6, BASE.Z + 6), Color3.fromRGB(28, 33, 48), Enum.Material.Glass)
-    local skyLight = newPart("Sky", Vector3.new(0.2, 5, 8), CFrame.new(centerX + 25.6, BASE.Y + 6, BASE.Z + 6), Color3.fromRGB(20, 25, 40), Enum.Material.Neon)
-    skyLight.Transparency = 1
-    -- Cold night sky through the window. It used to sit at zero until the
-    -- lightning hit, so the window was a black rectangle; a low steady value
-    -- gives the room a cold edge to sit against the tubes.
-    --
-    -- Range 14, NOT the 34 it had: the room is only 50 x 40, so a 34-stud light
-    -- at the window is not a rim on the glass, it is a second room light washing
-    -- everything. That single number was why every close-up rendered as a white
-    -- wall while the wides still looked like a blackout.
-    local skyPL = Instance.new("PointLight"); skyPL.Color = Color3.fromRGB(150,170,255); skyPL.Brightness = 0.6; skyPL.Range = 14; skyPL.Parent = skyLight
-    -- Overhead tubes. Half of them are dead and the rest are tired: a venue at
-    -- 3am is not evenly lit, it is a few pools of light with dark between them.
-    -- One fixture flickers, which is the cheapest "this place is wrong" signal
-    -- there is and it gives the room some motion before anything happens.
-    local flickerFixtures: { Part } = {}
-    for _, cx in { -14, 0, 14 } do
-        for _, cz in { -8, 8 } do
-            local dead = (cx == 14 and cz == -8) or (cx == -14 and cz == 8)
-            local fix = newPart("CeilLight", Vector3.new(4, 0.3, 2), CFrame.new(centerX + cx, BASE.Y + 11.6, BASE.Z + cz), Color3.fromRGB(190, 196, 214), Enum.Material.Neon)
-            if dead then
-                fix.Color = Color3.fromRGB(38, 40, 48)
-                fix.Material = Enum.Material.SmoothPlastic
-            else
-                local pl = Instance.new("PointLight")
-                pl.Color = Color3.fromRGB(214, 222, 240) -- fluorescent, not warm lamplight
-                -- Modest on purpose. Ambient already puts the room at a dim night
-                -- level; these are pools on top of it, not the room light. At 1.6
-                -- a single fixture lit a wall eight studs away to near-white, and
-                -- every close-up shot near a desk blew out.
-                pl.Brightness = 1.1
-                pl.Range = 28
-                pl.Parent = fix
-                if cx == 0 and cz == -8 then
-                    table.insert(flickerFixtures, fix)
-                end
-            end
-        end
-    end
-    table.insert(conns, RunService.Heartbeat:Connect(function()
-        local t = os.clock()
-        for _, fix in flickerFixtures do
-            local pl = fix:FindFirstChildOfClass("PointLight")
-            if pl then
-                -- mostly on, with irregular dropouts
-                local n = math.sin(t * 37) * math.sin(t * 11.3) * math.sin(t * 3.1)
-                local out = n < -0.55
-                pl.Brightness = out and 0.08 or 1.1
-                fix.Color = out and Color3.fromRGB(60, 63, 74) or Color3.fromRGB(190, 196, 214)
-            end
-        end
-    end))
+    local room = Lounge.build(set, BASE, floorTop)
+    local skyPL = room.skyPL
+    table.insert(conns, room.flicker)
+
 
     -- A key light riding the lens. The two desk actors are lit by their monitors,
     -- but the standing ones (the rager, and the victim who carries the climax)
@@ -926,70 +881,57 @@ local function playNightTransition()
     keyLight.Brightness = 0.12
     keyLight.Range = 6
     keyLight.Parent = keyPart
+    local keyOffset = CFrame.new(1.2, 1, 1)
     table.insert(conns, RunService.RenderStepped:Connect(function()
-        keyPart.CFrame = camera.CFrame * CFrame.new(1.2, 1, 1)
+        keyPart.CFrame = camera.CFrame * keyOffset
     end))
 
-    -- One role per actor, never reused, and each role has its own turn in
-    -- NGMIChoreo.TURN. If you add an actor, give it its own role and turn.
+    -- Three hackers. The first, standing with his arms wrapped round himself,
+    -- breaks and turns, then goes for the one slamming her desk at the next
+    -- table. The third jumps out of his chair to watch, and turns himself.
     local cast: { any } = {}
     local function facing(pos: Vector3): CFrame return CFrame.lookAt(pos, pos + Vector3.new(0,0,1)) end
     local function cue(a: any) if a then table.insert(cast, a) end return a end
-    local slamPos = Vector3.new(centerX - 12, seatY, BASE.Z - 3)
-    local slammer = cue(makeActor(facing(slamPos), "slam", true))
-    addDesk(slamPos, "$ make\nundefined reference\nundefined reference\n  187 errors\nbuild FAILED")
-    local shakePos = Vector3.new(centerX - 3, seatY, BASE.Z - 4)
-    local shaker = cue(makeActor(facing(shakePos), "headshake", true))
-    addDesk(shakePos, "Traceback (most recent call last)\n  File main.py, line 42\nSyntaxError: invalid syntax\nSyntaxError")
-    local rager = cue(makeActor(facing(Vector3.new(centerX + 7, standY, BASE.Z - 2)), "hair", false))
-    local pacer = cue(makeActor(facing(Vector3.new(centerX + 15, standY, BASE.Z - 3)), "pace", false))
-    if pacer then
-        pacer.a = Vector3.new(centerX + 12, standY, BASE.Z - 7); pacer.b = Vector3.new(centerX + 18, standY, BASE.Z + 3); pacer.speed = 0.9
-    end
-    local deskPos = Vector3.new(centerX - 20, seatY, BASE.Z - 2)
-    local facedesker = cue(makeActor(facing(deskPos), "facedesk", true))
-    addDesk(deskPos, "git push --force\n! [rejected] main -> main\nmerge conflict in 14 files\nmerge conflict in 14 files")
-    local starePos = Vector3.new(centerX + 20, seatY, BASE.Z + 3)
-    local starer = cue(makeActor(facing(starePos), "stare", true))
-    addDesk(starePos, "npm ERR! code ELIFECYCLE\nnpm ERR! errno 1\n\n> build failed\n> 04:11:58")
-    local victim = cue(makeActor(facing(Vector3.new(centerX, standY, BASE.Z + 5)), "unravel", false))
+    local victimPos = Vector3.new(centerX - 6, seatY, BASE.Z)
+    local victim = cue(makeActor(facing(victimPos), "slam", true))
+    Lounge.workTable(set, victimPos, floorTop, "$ make\nundefined reference\nundefined reference\n  187 errors\nbuild FAILED")
+    local first = cue(makeActor(facing(Vector3.new(centerX + 2, standY, BASE.Z + 2)), "unravel", false))
+    local witnessPos = Vector3.new(centerX + 12, seatY, BASE.Z)
+    local witness = cue(makeActor(facing(witnessPos), "headshake", true))
+    Lounge.workTable(set, witnessPos, floorTop, "npm ERR! code ELIFECYCLE\nnpm ERR! errno 1\n\n> build failed\n> 04:11:58")
 
-    -- One loop poses the whole cast. Each actor is in a mode: its breakdown
-    -- loop, its one-shot turn (mutating partway through), the turned idle, or
-    -- the exit walk (posed by the walk loop below).
+    -- One loop poses the whole cast. Each actor is in its breakdown loop, a
+    -- clip from NGMIChoreo.CLIP (mutating at the clip's mutateAt), or the
+    -- turned idle once a clip runs out.
     local animClock = os.clock()
     local onMutate: (any) -> () = function(_a: any) end
     local function poseActor(a: any, t: number, dt: number)
         local pose: RigPose.Pose
         if a.mode == "breakdown" then
-            local stride: number? = nil
-            if a.role == "pace" and a.a and a.b then
-                local u = math.sin(t*a.speed)*0.5+0.5
-                local pos = (a.a :: Vector3):Lerp(a.b :: Vector3, u)
-                local dir = (a.b :: Vector3) - (a.a :: Vector3)
-                local f = if math.cos(t*a.speed) >= 0 then dir else -dir
-                f = Vector3.new(f.X,0,f.Z); if f.Magnitude < 0.01 then f = Vector3.new(0,0,1) end
-                a.setPivot(CFrame.lookAt(pos, pos + f.Unit))
-                stride = t*a.speed*6
-            end
-            pose = NGMIChoreo.BREAKDOWN[a.role](t, a, stride)
-        elseif a.mode == "turn" then
-            local turn = NGMIChoreo.TURN[a.role]
+            pose = NGMIChoreo.BREAKDOWN[a.role](t, a)
+        elseif a.mode == "clip" then
+            local clip = a.clip
             local lt = t - a.modeStart
-            if not a.mutated and lt >= turn.mutateAt then
+            if clip.mutateAt and not a.mutated and lt >= clip.mutateAt then
                 a.mutated = true
-                NGMIMutation.apply(a.model, math.floor(a.phase * 100000) + 7, { fx = true })
+                a.mutatedAt = t
+                NGMIMutation.apply(a.model, math.floor(a.phase * 100000) + 7, { fx = true, style = a.style.key, progress = 0 })
                 onMutate(a)
             end
-            pose = turn.fn(math.min(lt, turn.length), a)
-            if lt >= turn.length then a.mode = "idle" end
-        elseif a.mode == "idle" then
-            pose = NGMIChoreo.idle(t, a)
+            pose = clip.fn(math.min(lt, clip.length), a)
+            if lt >= clip.length then a.mode = "idle" end
         else
-            pose = a.walkPose or {}
+            pose = NGMIChoreo.idle(t, a)
         end
-        if a.mutated then a.twist = math.min(1, a.twist + dt / 0.6) end
-        if a.twist > 0 then pose = RigPose.add(pose, NGMIMutation.TWIST, a.twist) end
+        -- the growths spread in at the style's own pace, the twist with them
+        if a.mutated then
+            if not a.grown then
+                local p = NGMIMutation.turnProgress(a.style, t - a.mutatedAt)
+                NGMIMutation.setProgress(a.model, p)
+                a.grown = p >= 1
+            end
+            pose = RigPose.add(pose, NGMIMutation.twistOf(a.model))
+        end
         a.rig:apply(pose, dt, 20)
     end
     table.insert(conns, RunService.Heartbeat:Connect(function(dt: number)
@@ -1004,27 +946,29 @@ local function playNightTransition()
             end
         end
     end))
-    local function startTurn(a: any)
-        if a and a.mode ~= "turn" then
-            a.mode = "turn"
+    local function play(a: any, clip: string)
+        if a then
+            a.mode = "clip"
+            a.clip = NGMIChoreo.CLIP[clip]
             a.modeStart = os.clock() - animClock
         end
     end
-
-    -- a short hallway through the back doorway, for the exit shot
-    newPart("HallFloor", Vector3.new(10, 0.4, 30), CFrame.new(centerX, floorTop - 0.2, backZ - 15), Color3.fromRGB(120, 124, 130), Enum.Material.Concrete)
-    newPart("HallCeil", Vector3.new(10, 0.4, 30), CFrame.new(centerX, BASE.Y + 10, backZ - 15), CEIL)
-    newPart("HallWallL", Vector3.new(0.6, 10, 30), CFrame.new(centerX - 5, BASE.Y + 5, backZ - 15), WALL)
-    newPart("HallWallR", Vector3.new(0.6, 10, 30), CFrame.new(centerX + 5, BASE.Y + 5, backZ - 15), WALL)
-    for hz = backZ - 4, backZ - 28, -8 do
-        local fix = newPart("HallLight", Vector3.new(2, 0.3, 2), CFrame.new(centerX, BASE.Y + 9.6, hz), Color3.fromRGB(255, 245, 225), Enum.Material.Neon)
-        local pl = Instance.new("PointLight"); pl.Color = Color3.fromRGB(206, 214, 232); pl.Brightness = 0.8; pl.Range = 18; pl.Parent = fix
+    --- Move an actor's pivot to `goal` over `dur` seconds, eased.
+    local function glide(a: any, goal: CFrame, dur: number)
+        local from = a.model:GetPivot()
+        local t0 = os.clock()
+        local c: RBXScriptConnection
+        c = RunService.Heartbeat:Connect(function()
+            local u = math.clamp((os.clock() - t0) / dur, 0, 1)
+            a.setPivot(from:Lerp(goal, u * u * (3 - 2 * u)))
+            if u >= 1 then c:Disconnect() end
+        end)
+        table.insert(conns, c)
     end
 
     -- TIMELINE
     task.wait(0.4)
-    showThought("My eyes are burning... I can't even read the screen anymore.", 2.8)
-    showThought("I'll just rest them for a few minutes. Just a few...", 2.8)
+    showThought("My eyes are burning... I'll just rest them for a minute.", 2.6)
 
     TweenService:Create(bg, TweenInfo.new(1.5, Enum.EasingStyle.Quad), { BackgroundTransparency = 0 }):Play()
     task.wait(1.6)
@@ -1038,8 +982,17 @@ local function playNightTransition()
         end
     end))
 
-    for _, d in workspace:GetDescendants() do
+    for _, d in WorldIndex.hideTargets() do
         if d:IsA("BillboardGui") and d.Name == "DeskBeaconLabel" and d.Enabled then d.Enabled = false; table.insert(hiddenBillboards, d) end
+    end
+    -- With the venue's ~480 ambient rigs in the workspace the set's lights
+    -- never reached it (every shot before NIGHT2 cleared the crowd rendered
+    -- black, measured); out of the workspace, the room lights at once. The
+    -- screen is black, so nobody sees the venue empty. Server removals still
+    -- replicate into the folder while it is parked.
+    local ambientPeople = workspace:FindFirstChild("AmbientPeople")
+    if ambientPeople then
+        ambientPeople.Parent = ReplicatedStorage
     end
 
     local function setCC(b: number, c: number, s: number, tint: Color3)
@@ -1051,14 +1004,16 @@ local function playNightTransition()
     -- the whole sequence read as a white room. The room is now dark, cold and
     -- blue, and the only real light is what the practicals throw: overhead
     -- fluorescents at half strength, and monitors on faces.
+    local setAmbient, setOutdoor, setFog = Color3.fromRGB(44, 48, 70), Color3.fromRGB(26, 30, 44), Color3.fromRGB(9, 10, 17)
+    local setAtmosColor, setAtmosDecay, setTint = Color3.fromRGB(10, 12, 18), Color3.fromRGB(3, 4, 7), Color3.fromRGB(198, 206, 235)
     local lightOverride = RunService.RenderStepped:Connect(function()
         -- Ambient is the lever here, not the fixtures. Roblox adds Ambient flatly
         -- everywhere regardless of occlusion, and this set is a sealed box, so the
         -- practicals only ever add pools on top of it. What made the original read
         -- as midday was not that Ambient was high, it was that it was high AND
         -- neutral grey; the same magnitude shifted hard to blue reads as night.
-        Lighting.Ambient = Color3.fromRGB(44, 48, 70)
-        Lighting.OutdoorAmbient = Color3.fromRGB(26, 30, 44)
+        Lighting.Ambient = setAmbient
+        Lighting.OutdoorAmbient = setOutdoor
         -- Brightness 0, i.e. no sun and no moon. Every part in this set is built
         -- with CastShadow = false, so the ceiling does not block skylight: any
         -- Brightness at all pours straight through it and lights the interior as
@@ -1072,7 +1027,7 @@ local function playNightTransition()
         -- separately from Brightness, and this shell casts no shadows to stop it.
         Lighting.EnvironmentDiffuseScale = 0
         Lighting.EnvironmentSpecularScale = 0
-        Lighting.FogColor = Color3.fromRGB(9, 10, 17)
+        Lighting.FogColor = setFog
         -- Fog starts well back on purpose. At FogStart 14 the wide shots were dark
         -- only because the fog was crushing them, while every close-up sat INSIDE
         -- the fog and rendered at the true ambient, which is why faces blew out
@@ -1087,11 +1042,11 @@ local function playNightTransition()
         local atmos = Lighting:FindFirstChildOfClass("Atmosphere")
         if atmos then
             atmos.Density = 0.3; atmos.Offset = 0.05
-            atmos.Color = Color3.fromRGB(10, 12, 18); atmos.Decay = Color3.fromRGB(3, 4, 7)
+            atmos.Color = setAtmosColor; atmos.Decay = setAtmosDecay
             atmos.Glare = 0; atmos.Haze = 0.6
         end
         -- Cold, slightly crushed, a little desaturated: 3am on a bad monitor.
-        setCC(-0.02, 0.14, -0.12, Color3.fromRGB(198, 206, 235))
+        setCC(-0.02, 0.14, -0.12, setTint)
         local blur = Lighting:FindFirstChild("GameBlur"); if blur and blur:IsA("BlurEffect") then blur.Size = 0 end
         local bloom = Lighting:FindFirstChild("GameBloom") or Lighting:FindFirstChildOfClass("BloomEffect")
         -- Bloom stays ON here, unlike before: it is what makes the monitors and
@@ -1105,121 +1060,88 @@ local function playNightTransition()
     TweenService:Create(botBar, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(1,0,BAR_H,0) }):Play()
 
     camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 3, BASE.Z + 18), Vector3.new(centerX, standY - 0.5, BASE.Z - 6))
+    -- Hold on black while the renderer lights the set around the camera's new
+    -- position; faded straight in, the first shot opened on a dark room.
+    task.wait(1.5)
     TweenService:Create(bg, TweenInfo.new(1.2, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 }):Play()
     task.wait(0.4)
-    showCaption("As the hours pass, everyone frantically tries to finish their projects.", 3.4)
+    showCaption("3 a.m. Nobody in here is going to make the deadline.", 2.6)
 
-    -- Wide sideways offsets on the two desk actors on purpose: the monitor sits
-    -- 2.5 studs in front of them, so a straight-on close-up is framed THROUGH the
-    -- back of the screen. Coming in off the shoulder clears it and puts the
-    -- monitor glow across the face instead of behind it.
-    cutToFace(slammer, 2.4, 3.2)
-    showCaption('"Why won\'t it compile? WHY won\'t it compile?!"', 2.6)
-    cutToFace(shaker, -2.4, 3.2)
-    showCaption('"Three hundred errors... I can\'t even look anymore."', 2.6)
-    cutToFace(rager, 0.6, 4.2)
-    showCaption('"There\'s no way. There\'s no way I finish in time!"', 2.6)
-    camera.CFrame = CFrame.lookAt(Vector3.new(centerX + 24, standY + 1.5, BASE.Z + 4), Vector3.new(centerX + 14, standY - 0.3, BASE.Z - 3))
-    showCaption('"I can\'t do this. I can\'t, I can\'t, I can\'t..."', 2.6)
-
-    -- (5) Close-up of the last hacker breaking, the line, with the screen shaking.
-    cutToFace(victim, 0.4, 3.6)
-    showCaption('"No. No, no, no, no—"', 1.6)
+    -- (2) The first one breaks: the line, with the screen shaking.
+    cutToFace(first, 0.4, 3.6)
+    showCaption('"No. No, no, no, no..."', 1.4)
     local climaxShake = startCamShake(1.7)
-    showCaption('"I\'m... I\'m NOT GONNA MAKE IT!!"', 1.8)
+    showCaption('"I\'m... I\'m NOT GONNA MAKE IT!!"', 1.6)
     climaxShake:Disconnect()
 
-    -- (6) The victim turns, framed wide enough to see the whole body go.
-    -- Every mutation from here on lands under a flash and a blur snap.
+    -- (3) He turns, framed wide enough to see the whole body go. Every
+    -- mutation lands under a flash and a blur snap.
     onMutate = function(_a: any)
         lightningFlash(0.5)
         getCutsceneBlur().Size = 10
         motionBlur(0, 0.35)
     end
-    cutToLocal(victim, Vector3.new(1.2, 0.6, -7.5), Vector3.new(0, -0.2, 0), 52)
+    cutToLocal(first, Vector3.new(1.2, 0.6, -7.5), Vector3.new(0, -0.2, 0), 52)
     local turnShake = startCamShake(0.8)
-    startTurn(victim)
-    task.wait(NGMIChoreo.TURN.unravel.length - 0.3)
+    play(first, "unravel")
+    task.wait(NGMIChoreo.CLIP.unravel.length - 0.2)
     turnShake:Disconnect()
 
-    -- (7) One by one the room turns. A montage, each turn shot for what is
-    --     wrong with it: the slammer from the side for the neck, the face on
-    --     the desk from low for the twisted lift, the rager wide for the fold,
-    --     and the starer dead on so its head snaps round into the lens.
-    camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 3, BASE.Z + 18), Vector3.new(centerX, standY - 0.5, BASE.Z - 6))
-    snapCut(74)
-    showCaption("One by one, they stop being hackers.", 1.0)
-    local montage = {
-        { a = slammer, cam = Vector3.new(3.4, 1.8, -2.4), look = Vector3.new(0, 1.4, 0), fov = 50, hold = 2.5 },
-        { a = facedesker, cam = Vector3.new(-1.9, 0.5, -2.1), look = Vector3.new(0, 1.0, -0.4), fov = 46, hold = 2.6 },
-        { a = rager, cam = Vector3.new(2.2, 0.6, -8.5), look = Vector3.new(0, -0.4, 0), fov = 50, hold = 2.7 },
-        { a = starer, cam = Vector3.new(0.15, 1.9, -2.3), look = Vector3.new(0, 1.5, 0), fov = 42, hold = 2.3 },
-    }
-    for _, shot in montage do
-        if shot.a then
-            startTurn(shot.a)
-            -- cut a beat into the move so the edit lands on motion
-            task.wait(0.12)
-            cutToLocal(shot.a, shot.cam, shot.look, shot.fov)
-            task.wait(shot.hold)
-        end
-    end
-    -- the last two go together, in the wide
-    camera.CFrame = CFrame.lookAt(Vector3.new(centerX + 6, standY + 2.2, BASE.Z + 15), Vector3.new(centerX + 4, standY - 0.6, BASE.Z - 4))
-    snapCut(66)
-    startTurn(shaker)
-    task.wait(0.35)
-    startTurn(pacer)
-    task.wait(2.6)
+    -- (4) He whips round and lunges at the hacker at the next table, coming
+    -- in on her left. Two-shot from her other front corner, so he charges in
+    -- from the right of frame instead of starting in front of the lens.
+    local vp = victim.model:GetPivot().Position
+    local strike = Vector3.new(vp.X + 3.4, standY, vp.Z - 0.6)
+    local twoShot = CFrame.lookAt(Vector3.new(vp.X - 4.5, standY + 1.1, vp.Z + 7), Vector3.new(vp.X + 1.6, seatY + 0.4, vp.Z - 0.3))
+    camera.CFrame = twoShot
+    snapCut(50)
+    local fromPos = first.model:GetPivot().Position
+    first.setPivot(CFrame.lookAt(fromPos, Vector3.new(vp.X, standY, vp.Z)))
+    task.wait(0.2)
+    glide(first, CFrame.lookAt(strike, Vector3.new(vp.X, standY, vp.Z)), 0.35)
+    play(first, "attack")
+    task.wait(0.3)
+    play(victim, "struck")
+    getCutsceneBlur().Size = 12
+    motionBlur(0, 0.3)
+    local hitShake = startCamShake(1.4)
+    task.wait(0.5)
+    hitShake:Disconnect()
+    task.wait(0.5)
 
-    -- (8a) They rise and shamble out the back doorway into the hallway.
-    local exits = {}
-    local lanes = { 0, -2, 2, -3.4, 3.4 }
-    local slot = 0
-    for _, a in { victim, rager, pacer, slammer, shaker, facedesker, starer } do
-        if a then
-            slot += 1
-            a.mode = "walk"
-            a.seated = false
-            local p = a.model:GetPivot().Position
-            table.insert(exits, { a = a, start = Vector3.new(p.X, standY, p.Z), lane = lanes[((slot - 1) % #lanes) + 1], delay = (slot - 1) * 0.4 })
-        end
-    end
-    local walkStart = os.clock()
-    local walkConn = RunService.Heartbeat:Connect(function()
-        local now = os.clock() - walkStart
-        for _, e in exits do
-            local t = math.max(0, now - e.delay)
-            local a = e.a
-            local door = Vector3.new(centerX + e.lane, standY, backZ + 2)
-            local hall = Vector3.new(centerX + e.lane, standY, backZ - 24)
-            local d1 = door - e.start
-            local seg1 = d1.Magnitude
-            -- uneven pace: every lurch stalls them for a beat
-            local dist = math.max(0, t * 4.2 - math.max(0, math.sin(t * 1.6 + a.phase)) * 0.6)
-            local pos, dir
-            if dist < seg1 then pos = e.start + d1.Unit * dist; dir = d1
-            else local d2 = hall - door; pos = door + d2.Unit * math.min(dist - seg1, d2.Magnitude); dir = d2 end
-            dir = Vector3.new(dir.X, 0, dir.Z); if dir.Magnitude < 0.01 then dir = Vector3.new(0,0,-1) end
-            a.setPivot(CFrame.lookAt(pos, pos + dir.Unit))
-            if now > e.delay then
-                a.walkPose = NGMIChoreo.shamble(now, dist * 1.7 + a.phase, a)
-            else
-                -- up out of the chair, waiting its turn to move
-                a.walkPose = NGMIChoreo.idle(now, a)
-            end
-        end
+    -- (5) The third jumps up out of his chair, turning to the attack, and
+    -- freezes with his hands to his mouth. Close on his face.
+    local wp = witness.model:GetPivot().Position
+    local standAt = Vector3.new(wp.X + 1.6, standY, wp.Z - 0.8)
+    local watchCF = CFrame.lookAt(standAt, Vector3.new(strike.X, standY, strike.Z))
+    witness.seated = false
+    play(witness, "horror")
+    glide(witness, watchCF, 0.3)
+    task.wait(0.05)
+    camera.CFrame = CFrame.lookAt(watchCF:PointToWorldSpace(Vector3.new(0.9, 1.5, -5.5)), watchCF:PointToWorldSpace(Vector3.new(0, 1.2, 0)))
+    snapCut(46)
+    task.wait(1.45)
+    -- what he is watching: she has stopped fighting
+    camera.CFrame = twoShot
+    snapCut(50)
+    task.wait(0.9)
+    -- (6) Back on him as the twitching takes over and he turns, the head
+    -- snapping up into the lens.
+    camera.CFrame = CFrame.lookAt(watchCF:PointToWorldSpace(Vector3.new(0.5, 1.8, -4.6)), watchCF:PointToWorldSpace(Vector3.new(0, 1.5, 0)))
+    snapCut(44)
+    local seizeShake: RBXScriptConnection? = nil
+    task.delay(0.55, function()
+        seizeShake = startCamShake(1.1)
     end)
-    table.insert(conns, walkConn)
-    task.wait(0.4)
-    camera.CFrame = CFrame.lookAt(Vector3.new(centerX, standY + 2.4, BASE.Z + 6), Vector3.new(centerX, standY - 0.2, backZ - 8))
-    snapCut(70)
-    task.wait(3.6)
+    task.wait(NGMIChoreo.CLIP.horror.length - 2.4 + 0.4)
+    if seizeShake then seizeShake:Disconnect() end
 
     -- (8) Lightning through the window — then the power dies.
     skyPL.Brightness = 9; lightningFlash(1)
+    strikeCrack:Play()
     task.wait(0.12); skyPL.Brightness = 0.6; task.wait(0.18)
     skyPL.Brightness = 11; lightningFlash(1)
+    thunderclap:Play()
     local powerShake = startCamShake(3)
     task.wait(0.16); skyPL.Brightness = 0
     task.wait(0.2)
@@ -1238,14 +1160,29 @@ local function playNightTransition()
             Lighting.EnvironmentSpecularScale = p.EnvironmentSpecularScale
             local cc = p.PostProcessing and p.PostProcessing.ColorCorrection
             if cc then setCC(cc.Brightness, cc.Contrast, cc.Saturation, cc.TintColor) end
+            -- the set held the haze at its own values; the night has thicker
+            local atmos = Lighting:FindFirstChildOfClass("Atmosphere")
+            local a = p.Atmosphere
+            if atmos and a then
+                atmos.Density = a.Density
+                atmos.Offset = a.Offset
+                atmos.Color = a.Color
+                atmos.Decay = a.Decay
+                atmos.Glare = a.Glare
+                atmos.Haze = a.Haze
+            end
             local b = p.PostProcessing and p.PostProcessing.Bloom
             local bloom = Lighting:FindFirstChild("GameBloom") or Lighting:FindFirstChildOfClass("BloomEffect")
             if b and bloom and bloom:IsA("BloomEffect") then bloom.Intensity = b.Intensity; bloom.Size = b.Size; bloom.Threshold = b.Threshold end
         end
     end
-    for _, d in set:GetDescendants() do if d:IsA("PointLight") then d.Enabled = false end end
-    for _, p in set:GetDescendants() do if p:IsA("BasePart") and p.Material == Enum.Material.Neon then p.Material = Enum.Material.SmoothPlastic end end
-    walkConn:Disconnect()
+    for _, d in set:GetDescendants() do
+        if d:IsA("PointLight") then
+            d.Enabled = false
+        elseif d:IsA("BasePart") and d.Material == Enum.Material.Neon then
+            d.Material = Enum.Material.SmoothPlastic
+        end
+    end
     task.wait(0.4)
     powerShake:Disconnect()
     task.wait(0.9)
@@ -1270,22 +1207,16 @@ local function playNightTransition()
     end
     setLids(1, 0)
     bg.BackgroundTransparency = 0
-    task.wait(0.6)
-    TweenService:Create(bg, TweenInfo.new(0.5), { BackgroundTransparency = 0.25 }):Play()
-    setLids(0.55, 0.5)
-    task.wait(0.7)
-    setLids(0.9, 0.16); task.wait(0.18)
-    setLids(0.4, 0.22); task.wait(0.6)
-    setLids(0.85, 0.15); task.wait(0.16)
-    setLids(0, 0.35); task.wait(0.5)
-
-    showThought("Wha—? The... the power's out.", 2.3)
-    showThought("I have to get up. I have to get the power running again.", 2.6)
-
-    TweenService:Create(camera, TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { CFrame = standCF }):Play()
-    task.wait(1.1)
-    showThought("...and finish my project.", 1.8)
     task.wait(0.4)
+    TweenService:Create(bg, TweenInfo.new(0.5), { BackgroundTransparency = 0.25 }):Play()
+    setLids(0.55, 0.4)
+    task.wait(0.5)
+    setLids(0.9, 0.16); task.wait(0.18)
+    setLids(0, 0.35); task.wait(0.4)
+
+    showThought("The power's out...", 1.6)
+    TweenService:Create(camera, TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { CFrame = standCF }):Play()
+    showThought("I have to get it running again. And finish my project.", 2.4)
 
     TweenService:Create(topBar, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = UDim2.new(1,0,0,0) }):Play()
     TweenService:Create(botBar, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = UDim2.new(1,0,0,0) }):Play()
@@ -1294,6 +1225,11 @@ local function playNightTransition()
 
     for _, c in conns do c:Disconnect() end
     set:Destroy(); gui:Destroy()
+    strikeCrack:Destroy()
+    thunderclap:Destroy()
+    if ambientPeople and ambientPeople.Parent == ReplicatedStorage then
+        ambientPeople.Parent = workspace
+    end
     camera.CameraType = Enum.CameraType.Custom
     -- The close-ups left the lens long and the blur hot; hand both back to
     -- gameplay or NIGHT2 opens on a 48-degree blurred frame.

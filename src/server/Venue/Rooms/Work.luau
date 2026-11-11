@@ -17,6 +17,7 @@ local Venue = script.Parent.Parent
 local Kit = require(Venue.Kit)
 local Layout = require(Venue.Layout)
 local Decor = require(Venue.Decor)
+local Closet = require(Venue.Closet)
 local AssetLibrary = require(Venue.Parent.AssetLibrary)
 
 local V = Vector3.new
@@ -37,9 +38,13 @@ local function farSide(c: Cell): (number, number)
 	return c.minZ, 1
 end
 
-local function hideSpot(parent: Instance, pos: Vector3)
-	local h = Kit.part(parent, "HideSpot", V(4, 2.5, 2.5), pos, Color3.new(), nil, { collide = false, transparency = 1 })
-	Kit.tag(h, TAGS.HIDING_SPOT)
+--- A hiding closet standing against the far wall at world X `x`, door
+--- facing into the room.
+local function closet(parent: Instance, c: Cell, level: number, x: number)
+	local farZ, inDir = farSide(c)
+	local z = farZ + inDir * (Layout.WALL_T / 2 + Closet.D / 2 + 0.05)
+	local base = V(x, Layout.floorY(level), z)
+	Closet.build(parent, CFrame.lookAt(base, base + V(0, 0, inDir)))
 end
 
 -- Counts across the whole player-desk lab so exactly four desks get tagged.
@@ -75,9 +80,6 @@ local function desk(parent: Instance, x: number, y: number, z: number, yaw: numb
 	if math.random() < 0.7 then
 		Decor.scatter(parent, x - 2.6, x - 1.2, z - 0.6, z + 0.6, y + 2.75, math.random(1, 2)) -- on the desk top (Office.DESK_TOP)
 	end
-	if st.idx % 5 == 0 then
-		hideSpot(parent, V(x, y + 1.3, z))
-	end
 end
 
 --- A pod: two rows of `n` desks back to back, monitors meeting in the middle.
@@ -104,6 +106,7 @@ function Work.lab(parent: Instance, c: Cell, level: number, ctx: Ctx)
 	Decor.onWall(parent, "TV", V(cx, y, farZ), V(0, 0, inDir))
 	Decor.onWall(parent, "Printer", V(c.maxX - 5, y, farZ), V(0, 0, inDir))
 	Decor.onWall(parent, "WaterCooler", V(c.minX + 4, y, farZ), V(0, 0, inDir))
+	closet(parent, c, level, c.minX + 11)
 	Decor.place("PlantTall", c.maxX - 2.5, y, farZ + inDir * 6, 0, parent)
 	Decor.onWall(parent, "TrashBin", V(c.minX, y, cz + 9), V(1, 0, 0))
 	Decor.scatter(parent, c.minX + 3, c.maxX - 3, c.minZ + 3, c.maxZ - 3, y + 0.1, math.random(5, 9))
@@ -131,6 +134,8 @@ function Work.hackhall(parent: Instance, c: Cell, level: number, _ctx: Ctx)
 	Decor.onWall(parent, "Vending", V(cx - 10, y, farZ), V(0, 0, inDir))
 	Decor.onWall(parent, "WaterCooler", V(cx - 5, y, farZ), V(0, 0, inDir))
 	Decor.onWall(parent, "TrashBin", V(cx + 6, y, farZ), V(0, 0, inDir))
+	closet(parent, c, level, cx + 16)
+	closet(parent, c, level, cx - 22)
 	for _, dx in { -40, 40 } do
 		Decor.place("BeanBag", cx + dx, y, farZ + inDir * 4, math.random(0, 359), parent)
 	end
@@ -168,6 +173,7 @@ function Work.meeting(parent: Instance, c: Cell, level: number, _ctx: Ctx)
 	Decor.onWall(parent, "Credenza", V(c.minX, y, cz + 9), V(1, 0, 0))
 	Decor.place("PlantTall", c.maxX - 2.5, y, farZ + inDir * 2.5, 0, parent)
 	Decor.place("Plant", c.minX + 2.6, y, farZ + inDir * 2.6, 0, parent)
+	closet(parent, c, level, c.minX + 9)
 end
 
 return Work

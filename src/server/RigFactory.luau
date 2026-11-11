@@ -292,14 +292,41 @@ end
 -- The NGMI base: Roblox's plain default R15 body and head, with no bundle
 -- parts, hair, accessories or clothes, so an NGMI is only ever its mutation
 -- style and never carries a venue person's items.
-local baseTemplate: Model | false | nil = nil
+local blankTemplate: Model | false | nil = nil
 
---- A blank body for NGMIMutation to build a style on.
-function RigFactory.createBase(): (Model, Humanoid)
-	if baseTemplate == nil then
-		baseTemplate = buildTemplate(Instance.new("HumanoidDescription"), "ngmi") or false
+--- A body for NGMIMutation to build a style on: one of the venue's realistic
+--- people with nothing on (Looks.BARE), so NGMIs share the crowd's adult
+--- proportions. `pick` chooses the body (random when nil). The default blocky
+--- R15 is only the fallback for when the avatar API can't build any of them.
+function RigFactory.createBase(pick: number?): (Model, Humanoid)
+	local bare = Looks.BARE
+	if #bare > 0 then
+		local first = if pick then (pick - 1) % #bare + 1 else math.random(#bare)
+		for k = 0, #bare - 1 do
+			local t = getTemplate(bare[(first + k - 1) % #bare + 1])
+			if t then
+				return finish(t)
+			end
+		end
 	end
-	return finish(if baseTemplate then baseTemplate else nil)
+	if blankTemplate == nil then
+		blankTemplate = buildTemplate(Instance.new("HumanoidDescription"), "ngmi") or false
+	end
+	return finish(if blankTemplate then blankTemplate else nil)
+end
+
+--- One dressed rig per crowd look, for client cutscenes to cast from when the
+--- venue has no people in it (a session that starts on the final night).
+function RigFactory.createCast(): { Model }
+	local out = {}
+	for _, look in Looks.CROWD do
+		local t = getTemplate(look)
+		if t then
+			local m = finish(t)
+			table.insert(out, m)
+		end
+	end
+	return out
 end
 
 local function getAnimator(hum: Humanoid): Animator

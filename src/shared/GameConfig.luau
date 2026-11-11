@@ -100,6 +100,7 @@ export type NGMIConfig = {
 	baseDamage: number,
 	stunDuration: number,
 	baseSpeed: number,
+	passiveSpeed: number,
 	detectionRange: number,
 	attackRange: number,
 	attackWindup: { [string]: number },
@@ -110,6 +111,7 @@ local NGMI: NGMIConfig = {
 	baseDamage = 25, -- HP per hit
 	stunDuration = 3, -- seconds incapacitated after deodorant
 	baseSpeed = 20, -- studs/sec pursuit speed
+	passiveSpeed = 13, -- studs/sec walking to a post or stalking (a bit over a player's walk)
 	detectionRange = 40, -- studs – radius of awareness
 	attackRange = 5, -- studs – melee swipe distance
 	-- Seconds per attack kind. The server times the hit off these and

@@ -111,27 +111,36 @@ local function sampleFloor(slab: BasePart): Vector3?
 	return nil
 end
 
+-- Slabs are found during the grime pass (one walk over the map serves both)
+-- and the venue never changes them, so the list is built once.
+local slabsByLevel: { [number]: { BasePart } } = {}
+local topSlabLevel = -1
+local walkableSlabs: { BasePart }? = nil
+
+local function noteSlab(d: BasePart)
+	if d.Parent then
+		local level = tonumber(string.match(d.Parent.Name, "^Slab_(%d+)$"))
+		if level then
+			slabsByLevel[level] = slabsByLevel[level] or {}
+			table.insert(slabsByLevel[level], d)
+			topSlabLevel = math.max(topSlabLevel, level)
+		end
+	end
+end
+
 --- Walkable floor slabs. MapBuilder files them under Slab_<level>; the highest
 --- level is the roof deck, whose top nobody walks on, so it is left out.
 local function floorSlabs(): { BasePart }
-	local byLevel: { [number]: { BasePart } } = {}
-	local topLevel = -1
-	for _, d in map:GetDescendants() do
-		if d:IsA("BasePart") and d.Name == "Slab" and d.Parent then
-			local level = tonumber(string.match(d.Parent.Name, "^Slab_(%d+)$"))
-			if level then
-				byLevel[level] = byLevel[level] or {}
-				table.insert(byLevel[level], d)
-				topLevel = math.max(topLevel, level)
-			end
-		end
+	if walkableSlabs then
+		return walkableSlabs
 	end
 	local slabs: { BasePart } = {}
-	for level, list in byLevel do
-		if level ~= topLevel or topLevel == 0 then
+	for level, list in slabsByLevel do
+		if level ~= topSlabLevel or topSlabLevel == 0 then
 			table.move(list, 1, #list, #slabs + 1, slabs)
 		end
 	end
+	walkableSlabs = slabs
 	return slabs
 end
 
@@ -142,7 +151,12 @@ end
 local function applyGrime()
 	local count = 0
 	for _, d in map:GetDescendants() do
-		if d:IsA("BasePart") and GRIME_MATERIALS[d.Material] and d.Name ~= "Slab" then
+		if not d:IsA("BasePart") then
+			continue
+		end
+		if d.Name == "Slab" then
+			noteSlab(d)
+		elseif GRIME_MATERIALS[d.Material] then
 			local darken = rng:NextNumber(0, GRIME_DARKEN_MAX)
 			local shift = if rng:NextNumber() < 0.5
 				then Color3.fromRGB(60, 50, 30) -- nicotine warm

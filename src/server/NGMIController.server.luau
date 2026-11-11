@@ -28,6 +28,7 @@ local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local NGMIMutation = require(ReplicatedStorage.Shared.NGMIMutation)
 local BadgeManager = require(script.Parent:WaitForChild("BadgeManager"))
 local RigFactory = require(script.Parent:WaitForChild("RigFactory"))
+local Director = require(script.Parent:WaitForChild("NGMI"):WaitForChild("Director"))
 
 --------------------------------------------------------------------------------
 -- Remotes
@@ -42,13 +43,17 @@ local NGMIStunned       = Remotes:WaitForChild("NGMIStunned")       :: RemoteEve
 --------------------------------------------------------------------------------
 local PHASE_NIGHT2: number = GameConfig.Phase.NIGHT2
 
--- Wave definitions: { timeOffsetSeconds, count }
+-- Wave definitions: { timeOffsetSeconds, count PER FLOOR }. Every floor gets
+-- its own NGMIs so each central corridor fills (see NGMI/Director).
 local WAVE_SCHEDULE: { { time: number, count: number } } = {
-	{ time = 0,   count = 2 },  -- Wave 1: immediate
-	{ time = 180, count = 3 },  -- Wave 2: 3:00
-	{ time = 360, count = 4 },  -- Wave 3: 6:00
-	{ time = 600, count = 5 },  -- Wave 4: 10:00
+	{ time = 0,   count = 2 },  -- Wave 1: immediate, 6 in all
+	{ time = 150, count = 1 },  -- Wave 2: 2:30
+	{ time = 330, count = 1 },  -- Wave 3: 5:30
+	{ time = 540, count = 1 },  -- Wave 4: 9:00, 15 in all
 }
+local SPAWN_CLEARANCE = 40 -- never spawn this close to a player
+local DIRECTOR_INTERVAL = 1
+local FLOOR_SECURED_KEY: { [number]: string } = { [0] = "FloorSecured0", [1] = "FloorSecured1", [2] = "FloorSecured2" }
 
 -- AI Tuning (base values — scaled by difficulty over time)
 local BASE_SPEED: number            = GameConfig.NGMI.baseSpeed        -- 20
@@ -66,7 +71,7 @@ local CHASE_MAX_DURATION: number    = 14  -- chase "for a bit" — then break of
 local VISION_CONE_DOT: number       = math.cos(math.rad(30))  -- half-angle = 30° → 60° cone
 local SOUND_DETECT_RANGE: number    = 25  -- sprint noise detection radius
 local PROXIMITY_DETECT_RANGE: number = 12 -- notices you regardless of facing within this
-local HIDING_DETECT_RANGE: number   = 5   -- can detect hidden players within this
+local SEARCH_RADIUS: number         = 9   -- how wide a lost NGMI casts about a hiding spot
 local PATROL_PAUSE_MIN: number      = 2
 local PATROL_PAUSE_MAX: number      = 4
 local PATH_RECALC_INTERVAL: number  = 1   -- re-path every N seconds while chasing
@@ -149,6 +154,7 @@ type NGMIData = {
 	mumbleTimer: number,
 	-- Path
 	currentPath: Path?,
+	pathWaypoints: { PathWaypoint }, -- currentPath:GetWaypoints(), fetched once per path
 	pathWaypointIndex: number,
 	-- Attack sequencing: nil when idle, else "windup" / "strike" / "recover"
 	attackPhase: string?,
@@ -156,6 +162,15 @@ type NGMIData = {
 	attackTimer: number,
 	attackSeq: number,
 	forceLunge: boolean,
+	-- Night director (passive movement): home floor, post, stalk target
+	agent: Director.Agent,
+	pathGoal: Vector3?,
+	pathing: boolean, -- a ComputeAsync is in flight; skip AI ticks until it lands
+	loitering: boolean,
+	anchorPos: Vector3, -- where it was last seen making progress
+	stillFor: number, -- seconds without progress while travelling
+	fleeing: boolean, -- its floor was secured; running until it is gone
+	fleeFor: number,
 }
 
 --------------------------------------------------------------------------------
@@ -200,6 +215,8 @@ local WEAPON_REACH: { [string]: number } = { spray = 30, melee = 12 }
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 raycastParams.IgnoreWater = true
+-- The filter is every live NGMI model; rebuilt only after ngmiEntities changes.
+local losFilterDirty = true
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -224,6 +241,11 @@ end
 --[[ Get effective speed for an NGMI, factoring difficulty scaling. ]]
 local function getEffectiveSpeed(): number
 	return BASE_SPEED + difficultySpeed
+end
+
+--[[ Walking speed outside a chase (to a post, stalking), with difficulty. ]]
+local function getPassiveSpeed(): number
+	return GameConfig.NGMI.passiveSpeed + difficultySpeed
 end
 
 --[[ Get effective detection range. ]]
@@ -458,20 +480,56 @@ local function createBlockNGMIModel(spawnCFrame: CFrame): Model
 	return model
 end
 
+-- Styles are dealt from a shuffled bag so every wave mixes all of them.
+local styleBag: { string } = {}
+local function nextStyle(): string
+	if #styleBag == 0 then
+		styleBag = table.clone(NGMIMutation.STYLES)
+		for i = #styleBag, 2, -1 do
+			local j = math.random(i)
+			styleBag[i], styleBag[j] = styleBag[j], styleBag[i]
+		end
+	end
+	return table.remove(styleBag) :: string
+end
+
+--- Keep an NGMI changing for as long as it is out: each style spawns part
+--- way through its mutation and grows on its own schedule (NGMIStyles.night).
+local function growOverNight(model: Model)
+	local style = NGMIMutation.styleOf(model)
+	local born = os.clock()
+	local last = model:GetAttribute("MutationProgress") :: number
+	task.spawn(function()
+		while model.Parent and last < style.night.to do
+			task.wait(1)
+			local p = NGMIMutation.nightProgress(style, os.clock() - born)
+			if p - last >= 0.01 then
+				last = p
+				NGMIMutation.setProgress(model, p)
+			end
+		end
+	end)
+end
+
 --[[
 	The real NGMI: a venue avatar rig run through the same mutation the night
 	transition cutscene uses, so the things hunting you are the hackers you
 	watched turn. Full R15 limbs (elbows, knees, hands) give NGMIAnimator
-	something to stagger, lunge and swipe with.
+	something to stagger, lunge and swipe with. One of four styles
+	(Shared.NGMIStyles), dealt so each wave mixes them.
 ]]
 local function createNGMIModel(spawnCFrame: CFrame): Model
-	local model, humanoid = RigFactory.create()
+	-- A blank body, never a venue person or a player's friend: the style is
+	-- the whole look.
+	local model, humanoid = RigFactory.createBase()
 	if not model:FindFirstChild("UpperTorso") then
 		model:Destroy()
 		return createBlockNGMIModel(spawnCFrame)
 	end
 	model.Name = "NGMI"
-	NGMIMutation.apply(model, math.random(1, 1000000))
+	local style = NGMIMutation.style(nextStyle())
+	NGMIMutation.apply(model, math.random(1, 1000000), { style = style.key, progress = style.night.from })
+	growOverNight(model)
 
 	humanoid.MaxHealth = math.huge -- NGMIs cannot be killed
 	humanoid.Health = math.huge
@@ -549,15 +607,26 @@ local function registerNGMI(model: Model): NGMIData
 		billboardGui = billboard,
 		mumbleTimer = math.random(3, 6),
 		currentPath = nil,
+		pathWaypoints = {},
 		pathWaypointIndex = 1,
 		attackPhase = nil,
 		attackKind = "swipe_r",
 		attackTimer = 0,
 		attackSeq = 0,
 		forceLunge = false,
+		agent = Director.newAgent(rootPart),
+		pathGoal = nil,
+		pathing = false,
+		loitering = false,
+		anchorPos = rootPart.Position,
+		stillFor = 0,
+		fleeing = false,
+		fleeFor = 0,
 	}
 
 	ngmiEntities[model] = data
+	losFilterDirty = true
+	humanoid.WalkSpeed = getPassiveSpeed()
 	model:SetAttribute("AIState", data.state)
 	return data
 end
@@ -576,15 +645,22 @@ local function hasLineOfSight(ngmi: NGMIData, targetPos: Vector3): boolean
 		return true
 	end
 
-	-- Build exclusion list: all parts belonging to this NGMI model
-	local excludeList: { Instance } = { ngmi.model }
-	-- Also exclude other NGMI models to prevent them blocking each other
-	for otherModel, _ in ngmiEntities do
-		if otherModel ~= ngmi.model then
+	-- Exclude this NGMI and every other one so they never block each other.
+	if ngmiEntities[ngmi.model] == nil then
+		local excludeList: { Instance } = { ngmi.model }
+		for otherModel, _ in ngmiEntities do
 			table.insert(excludeList, otherModel)
 		end
+		raycastParams.FilterDescendantsInstances = excludeList
+		losFilterDirty = true
+	elseif losFilterDirty then
+		local excludeList: { Instance } = {}
+		for otherModel, _ in ngmiEntities do
+			table.insert(excludeList, otherModel)
+		end
+		raycastParams.FilterDescendantsInstances = excludeList
+		losFilterDirty = false
 	end
-	raycastParams.FilterDescendantsInstances = excludeList
 
 	local result = workspace:Raycast(origin, direction.Unit * distance, raycastParams)
 
@@ -629,6 +705,11 @@ local function isPlayerSprinting(player: Player): boolean
 	return hum.WalkSpeed > GameConfig.Player.walkSpeed
 end
 
+--[[ Protected by the night's opening grace or mid-encounter cutscene. ]]
+local function isSpared(player: Player): boolean
+	return player:GetAttribute("NightEncounter") == true or player:GetAttribute("NightGrace") == true
+end
+
 --[[ Check if a player is hiding. ]]
 local function isPlayerHiding(player: Player): boolean
 	-- Set only by InteractionManager's hiding-spot prompt (server side).
@@ -662,23 +743,22 @@ local function detectPlayer(ngmi: NGMIData): Player?
 		if not playerHead then
 			continue
 		end
+		-- mid-cutscene, or still in the night's opening grace before their
+		-- encounter (NightEncounter): untouchable until it hands back
+		if isSpared(player) then
+			continue
+		end
 
 		local delta = playerHead.Position - ngmi.headPart.Position
-		local distSq = delta.Magnitude * delta.Magnitude
 		local dist = delta.Magnitude
+		local distSq = dist * dist
 
 		local hiding = isPlayerHiding(player)
 
-		-- Hidden players: only detectable within 5 studs
+		-- Hidden players are never seen or heard. The danger while hidden is
+		-- an NGMI searching close by (HeartbeatMinigame): failing that pulls
+		-- the player out of their spot, and then they are fair game.
 		if hiding then
-			if dist > HIDING_DETECT_RANGE then
-				continue
-			end
-			-- Within 5 studs, hidden players are detected regardless
-			if distSq < bestDistSq then
-				bestDistSq = distSq
-				bestPlayer = player
-			end
 			continue
 		end
 
@@ -694,18 +774,27 @@ local function detectPlayer(ngmi: NGMIData): Player?
 		-- Close proximity: walk into an NGMI's personal space and it notices you,
 		-- whichever way it's facing (no vision cone needed), as long as it can
 		-- actually see you (not through a wall).
-		if dist <= PROXIMITY_DETECT_RANGE and hasLineOfSight(ngmi, playerHead.Position) then
-			if distSq < bestDistSq then
-				bestDistSq = distSq
-				bestPlayer = player
+		-- The same ray twice in one tick gives the same answer, so a blocked
+		-- proximity check is reused for the vision check.
+		local sight: boolean? = nil
+		if dist <= PROXIMITY_DETECT_RANGE then
+			sight = hasLineOfSight(ngmi, playerHead.Position)
+			if sight then
+				if distSq < bestDistSq then
+					bestDistSq = distSq
+					bestPlayer = player
+				end
+				continue
 			end
-			continue
 		end
 
 		-- Vision detection: range + cone + line of sight
 		if dist <= detectionRange then
 			if isInVisionCone(ngmi, playerHead.Position) then
-				if hasLineOfSight(ngmi, playerHead.Position) then
+				if sight == nil then
+					sight = hasLineOfSight(ngmi, playerHead.Position)
+				end
+				if sight then
 					if distSq < bestDistSq then
 						bestDistSq = distSq
 						bestPlayer = player
@@ -748,14 +837,22 @@ end
 local function navigateTo(ngmi: NGMIData, targetPos: Vector3): ()
 	local path = PathfindingService:CreatePath({
 		AgentRadius = 2,
-		AgentHeight = 5,
+		-- the realistic bodies stand 5.7 to 6.7 studs
+		AgentHeight = 7,
 		AgentCanJump = true,
 		AgentCanClimb = false,
 	})
 
+	-- ComputeAsync yields, and the Heartbeat loop would otherwise tick this
+	-- NGMI again from the next frame while the first call is still out.
+	ngmi.pathing = true
 	local ok = pcall(function()
 		path:ComputeAsync(ngmi.rootPart.Position, targetPos)
 	end)
+	ngmi.pathing = false
+	if not ngmi.model.Parent then
+		return
+	end
 
 	if not ok or path.Status ~= Enum.PathStatus.Success then
 		-- Fallback: walk directly toward target
@@ -766,6 +863,7 @@ local function navigateTo(ngmi: NGMIData, targetPos: Vector3): ()
 
 	local waypoints = path:GetWaypoints()
 	ngmi.currentPath = path
+	ngmi.pathWaypoints = waypoints
 	ngmi.pathWaypointIndex = 2 -- skip first waypoint (current position)
 
 	if #waypoints >= 2 then
@@ -779,13 +877,22 @@ local function navigateTo(ngmi: NGMIData, targetPos: Vector3): ()
 	end
 end
 
+--[[ Has the NGMI reached a path waypoint? Measured flat: waypoints sit on the
+     floor while the root rides ~3.6 studs above it, so a 3D distance under
+     3.5 could never happen and the NGMI stood at every waypoint until the
+     next re-path (the old "too slow" passive gait). ]]
+local function reachedWaypoint(ngmi: NGMIData, wpPos: Vector3, reach: number): boolean
+	local d = wpPos - ngmi.rootPart.Position
+	return Vector3.new(d.X, 0, d.Z).Magnitude < reach and math.abs(d.Y) < 6
+end
+
 --[[ Advance to the next waypoint in the current path, if any. ]]
 local function advancePathWaypoint(ngmi: NGMIData): boolean
 	if not ngmi.currentPath then
 		return false
 	end
 
-	local waypoints = ngmi.currentPath:GetWaypoints()
+	local waypoints = ngmi.pathWaypoints
 	ngmi.pathWaypointIndex += 1
 
 	if ngmi.pathWaypointIndex > #waypoints then
@@ -811,6 +918,10 @@ local function transitionTo(ngmi: NGMIData, newState: AIState, target: Player?):
 	ngmi.model:SetAttribute("AIState", newState)
 	ngmi.stateTimer = 0
 	ngmi.targetPlayer = target
+	-- Who it is after, for the client (ClosetGlow lights free closets for the
+	-- player being trailed).
+	local hunting = newState == "ALERT" or newState == "CHASE" or newState == "ATTACK" or newState == "LOST"
+	ngmi.model:SetAttribute("TargetUserId", if hunting and target then target.UserId else nil)
 	ngmi.currentPath = nil
 	if newState ~= "ATTACK" then
 		ngmi.attackPhase = nil
@@ -818,13 +929,12 @@ local function transitionTo(ngmi: NGMIData, newState: AIState, target: Player?):
 	end
 
 	if newState == "PATROL" then
-		ngmi.humanoid.WalkSpeed = getEffectiveSpeed()
+		ngmi.humanoid.WalkSpeed = getPassiveSpeed()
 		ngmi.targetPlayer = nil
 		ngmi.patrolPauseRemaining = 0
 		ngmi.pathTimer = 0
-		-- currentPath is already nil; updatePatrol will pathfind a nearby wander
-		-- leg (NOT a straight MoveTo to a far spawn point, which walked them into
-		-- walls).
+		-- currentPath is already nil; updatePatrol paths to the goal the
+		-- director gives it (corridor post or stalk target).
 
 	elseif newState == "ALERT" then
 		ngmi.humanoid.WalkSpeed = 0
@@ -872,51 +982,87 @@ local function updatePatrol(ngmi: NGMIData, dt: number): ()
 		return
 	end
 
-	-- Dwelling at the end of a wander leg.
+	-- Holding still for a beat (a loiter shuffle, or a failed path).
 	if ngmi.patrolPauseRemaining > 0 then
 		ngmi.patrolPauseRemaining -= dt
 		return
 	end
 
-	ngmi.pathTimer += dt
+	-- The director says where to go: this floor's corridor post, or (as the
+	-- night wears on) the nearest player on this floor.
+	local goal, stalking = Director.goal(ngmi.agent)
+	if not goal then
+		return
+	end
+	local pos = ngmi.rootPart.Position
+	local flat = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z).Magnitude
 
-	-- No active path → start a new wander leg toward a nearby point, navigating
-	-- around walls via pathfinding (a straight MoveTo to a far spawn point used to
-	-- send them face-first into walls).
-	if not ngmi.currentPath then
+	-- At the post: stand there in the corridor, shuffling in place, turning
+	-- now and then. Never a neat line; the posts themselves are scattered.
+	if not stalking and flat <= Director.ARRIVE + (if ngmi.loitering then Director.LOITER else 0) then
+		ngmi.loitering = true
+		ngmi.currentPath = nil
 		local ang = math.random() * math.pi * 2
-		local rad = math.random(16, 32)
-		local goal = ngmi.rootPart.Position + Vector3.new(math.cos(ang) * rad, 0, math.sin(ang) * rad)
-		navigateTo(ngmi, goal)
+		local r = math.random() * Director.LOITER
+		ngmi.humanoid:MoveTo(goal + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r))
+		ngmi.patrolPauseRemaining = PATROL_PAUSE_MIN + math.random() * (PATROL_PAUSE_MAX - PATROL_PAUSE_MIN)
+		return
+	end
+	ngmi.loitering = false
+
+	-- Wedged on furniture or a door frame: hop and re-path after a few
+	-- seconds; still stuck well after that, and with nobody close enough to
+	-- see it, it is simply put on its post.
+	if (pos - ngmi.anchorPos).Magnitude > 2 then
+		ngmi.anchorPos = pos
+		ngmi.stillFor = 0
+	else
+		ngmi.stillFor += dt
+	end
+	if ngmi.stillFor > 4 and ngmi.currentPath then
+		ngmi.humanoid.Jump = true
+		ngmi.currentPath = nil
+	end
+	if ngmi.stillFor > 14 and not stalking then
+		local watched = false
+		for _, player in Players:GetPlayers() do
+			local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			local sameFloor = r and r:IsA("BasePart") and Director.levelOf(r.Position.Y) == ngmi.agent.level
+			if sameFloor and r and ((r.Position - pos).Magnitude < 70 or (r.Position - goal).Magnitude < 70) then
+				watched = true
+				break
+			end
+		end
+		if not watched then
+			ngmi.model:PivotTo(CFrame.new(goal + Vector3.new(0, 1, 0)))
+		end
+		ngmi.anchorPos = goal
+		ngmi.stillFor = 0
+		return
+	end
+
+	-- Travelling: path to the goal and keep walking. Stalkers re-path often
+	-- since their goal moves; a goal that jumped re-paths at once.
+	ngmi.pathTimer += dt
+	local moved = ngmi.pathGoal == nil or ((ngmi.pathGoal :: Vector3) - goal).Magnitude > 10
+	if not ngmi.currentPath or moved or ngmi.pathTimer > (if stalking then 2.5 else 8) then
 		ngmi.pathTimer = 0
+		ngmi.pathGoal = goal
+		navigateTo(ngmi, goal)
 		if not ngmi.currentPath then
-			-- pathfinding failed; brief dwell before trying a different direction
-			ngmi.patrolPauseRemaining = 0.6
+			-- no route; walk straight at it for a moment before trying again
+			ngmi.patrolPauseRemaining = 1
 		end
 		return
 	end
 
-	-- Abandon a leg we've been stuck on too long (re-path next).
-	if ngmi.pathTimer > 6 then
-		ngmi.currentPath = nil
-		ngmi.patrolPauseRemaining = 0.4
-		return
-	end
-
-	-- Follow the path, advancing through its waypoints.
-	local wps = ngmi.currentPath:GetWaypoints()
+	local wps = ngmi.pathWaypoints
 	if ngmi.pathWaypointIndex <= #wps then
-		local wpPos = wps[ngmi.pathWaypointIndex].Position
-		if (ngmi.rootPart.Position - wpPos).Magnitude < 3.5 then
-			if not advancePathWaypoint(ngmi) then
-				-- arrived → dwell a moment, then pick a fresh wander leg
-				ngmi.currentPath = nil
-				ngmi.patrolPauseRemaining = PATROL_PAUSE_MIN + math.random() * (PATROL_PAUSE_MAX - PATROL_PAUSE_MIN)
-			end
+		if reachedWaypoint(ngmi, wps[ngmi.pathWaypointIndex].Position, 3) and not advancePathWaypoint(ngmi) then
+			ngmi.currentPath = nil
 		end
 	else
 		ngmi.currentPath = nil
-		ngmi.patrolPauseRemaining = PATROL_PAUSE_MIN
 	end
 end
 
@@ -934,7 +1080,7 @@ end
 
 local function updateChase(ngmi: NGMIData, dt: number): ()
 	local target = ngmi.targetPlayer
-	if not target then
+	if not target or isSpared(target) then
 		transitionTo(ngmi, "PATROL", nil)
 		return
 	end
@@ -973,21 +1119,28 @@ local function updateChase(ngmi: NGMIData, dt: number): ()
 	end
 
 	-- Clicker leap: from a few strides out, sometimes launch straight at them.
-	if dist <= LUNGE_RANGE and ngmi.attackCooldown <= 0 and math.random() < LUNGE_CHANCE * dt
-		and hasLineOfSight(ngmi, targetRoot.Position) then
-		transitionTo(ngmi, "ATTACK", target)
-		ngmi.forceLunge = true
-		return
+	-- `sight` keeps the lunge's ray so the check below does not cast it again.
+	local sight: boolean? = nil
+	if dist <= LUNGE_RANGE and ngmi.attackCooldown <= 0 and math.random() < LUNGE_CHANCE * dt then
+		sight = hasLineOfSight(ngmi, targetRoot.Position)
+		if sight then
+			transitionTo(ngmi, "ATTACK", target)
+			ngmi.forceLunge = true
+			return
+		end
 	end
 
-	-- If target is hiding and out of close range, lose them
-	if isPlayerHiding(target) and dist > HIDING_DETECT_RANGE then
+	-- Ducked into a hiding spot: lost them (it searches nearby, see LOST)
+	if isPlayerHiding(target) then
 		transitionTo(ngmi, "LOST", target)
 		return
 	end
 
 	-- Check line of sight periodically — if lost, start LOST timer
-	if not hasLineOfSight(ngmi, targetRoot.Position) and not isPlayerSprinting(target) then
+	if sight == nil then
+		sight = hasLineOfSight(ngmi, targetRoot.Position)
+	end
+	if not sight and not isPlayerSprinting(target) then
 		-- Can't see or hear them — start losing track
 		transitionTo(ngmi, "LOST", target)
 		return
@@ -1006,10 +1159,9 @@ local function updateChase(ngmi: NGMIData, dt: number): ()
 
 	-- Advance waypoints if close to current one
 	if ngmi.currentPath then
-		local wps = ngmi.currentPath:GetWaypoints()
+		local wps = ngmi.pathWaypoints
 		if ngmi.pathWaypointIndex <= #wps then
-			local wpPos = wps[ngmi.pathWaypointIndex].Position
-			if (ngmi.rootPart.Position - wpPos).Magnitude < 3 then
+			if reachedWaypoint(ngmi, wps[ngmi.pathWaypointIndex].Position, 2.5) then
 				advancePathWaypoint(ngmi)
 			end
 		end
@@ -1045,7 +1197,7 @@ end
 
 local function updateAttack(ngmi: NGMIData, dt: number): ()
 	local target = ngmi.targetPlayer
-	if not target then
+	if not target or isSpared(target) then
 		transitionTo(ngmi, "PATROL", nil)
 		return
 	end
@@ -1162,6 +1314,31 @@ local function updateRetreat(ngmi: NGMIData, dt: number): ()
 		navigateTo(ngmi, retreatTarget)
 	end
 
+	-- Driven off a secured floor: keep running, re-aiming away every couple
+	-- of seconds, and once nobody is close (or after a while) it is gone.
+	if ngmi.fleeing then
+		ngmi.pathTimer += dt
+		if ngmi.pathTimer > 2 then
+			ngmi.pathTimer = 0
+			ngmi.stateTimer = math.min(ngmi.stateTimer, 0.05) -- re-pick a direction next tick
+		end
+		local near = false
+		for _, player in Players:GetPlayers() do
+			local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if r and r:IsA("BasePart") and (r.Position - ngmi.rootPart.Position).Magnitude < 40 then
+				near = true
+				break
+			end
+		end
+		ngmi.fleeFor += dt
+		if (ngmi.fleeFor > 3 and not near) or ngmi.fleeFor > 9 then
+			ngmiEntities[ngmi.model] = nil
+			losFilterDirty = true
+			ngmi.model:Destroy()
+		end
+		return
+	end
+
 	if ngmi.stateTimer >= RETREAT_DURATION then
 		transitionTo(ngmi, "PATROL", nil)
 	end
@@ -1170,9 +1347,10 @@ end
 local function updateLost(ngmi: NGMIData, dt: number): ()
 	ngmi.stateTimer += dt
 
-	-- Try to re-detect the target
+	-- Try to re-detect the target (never through a hiding spot)
 	local target = ngmi.targetPlayer
-	if target then
+	local targetHidden = target ~= nil and isPlayerHiding(target)
+	if target and not targetHidden then
 		local char = target.Character
 		if char then
 			local playerHead = char:FindFirstChild("Head") :: BasePart?
@@ -1193,15 +1371,22 @@ local function updateLost(ngmi: NGMIData, dt: number): ()
 		return
 	end
 
-	-- Wander toward last known position briefly
-	if ngmi.stateTimer < 1 and target then
-		local char = target.Character
-		if char then
-			local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if root then
-				ngmi.humanoid:MoveTo(root.Position)
-			end
+	-- Wander toward last known position briefly. If they hid, it casts about
+	-- near where they vanished instead, slower, every couple of seconds:
+	-- close enough to set off their heartbeat, not straight to the door.
+	local char = target and target.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if root and targetHidden then
+		ngmi.humanoid.WalkSpeed = getPassiveSpeed() * 0.6
+		ngmi.pathTimer += dt
+		if ngmi.stateTimer < dt * 1.5 or ngmi.pathTimer > 2.2 then
+			ngmi.pathTimer = 0
+			local a = math.random() * math.pi * 2
+			local r = 4 + math.random() * (SEARCH_RADIUS - 4)
+			ngmi.humanoid:MoveTo(root.Position + Vector3.new(math.cos(a) * r, 0, math.sin(a) * r))
 		end
+	elseif root and ngmi.stateTimer < 1 then
+		ngmi.humanoid:MoveTo(root.Position)
 	end
 
 	-- Give up after timeout
@@ -1218,7 +1403,20 @@ local function updateNGMI(ngmi: NGMIData, dt: number): ()
 	-- Safety: if model was destroyed
 	if not ngmi.model.Parent then
 		ngmiEntities[ngmi.model] = nil
+		losFilterDirty = true
 		return
+	end
+	if ngmi.pathing then
+		return
+	end
+
+	-- Standing on a floor whose servers are all back online: it flees.
+	local level = Director.levelOf(ngmi.rootPart.Position.Y)
+	if not ngmi.fleeing and workspace:GetAttribute(FLOOR_SECURED_KEY[level] or "FloorSecured" .. level) then
+		ngmi.fleeing = true
+		transitionTo(ngmi, "RETREAT", nil)
+		ngmi.humanoid.WalkSpeed = getEffectiveSpeed() * RETREAT_SPEED_MULT
+		showOverheadText(ngmi, "...too bright...", 1.5)
 	end
 
 	-- Update attack cooldown globally
@@ -1248,24 +1446,52 @@ end
 -- Wave Spawning
 --------------------------------------------------------------------------------
 
---[[ Spawn a wave of NGMIs at random spawn points. ]]
+--[[ Spawn points on one floor that no player is near. Room spawns come first,
+     so new NGMIs walk out of a doorway into the corridor rather than appear
+     in it. The boss-room marker is left to the bathroom fight. ]]
+local function spawnsOnLevel(level: number): { BasePart }
+	local rooms, other = {}, {}
+	for _, sp in getSpawnPoints() do
+		if Director.levelOf(sp.Position.Y) ~= level or sp.Name:find("Boss") then
+			continue
+		end
+		local clear = true
+		for _, player in Players:GetPlayers() do
+			local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if root and root:IsA("BasePart") and (root.Position - sp.Position).Magnitude < SPAWN_CLEARANCE then
+				clear = false
+				break
+			end
+		end
+		if clear then
+			table.insert(if sp.Name:find("^NGMISpawn_L") then rooms else other, sp)
+		end
+	end
+	return if #rooms > 0 then rooms else other
+end
+
+--[[ Spawn `count` NGMIs on every floor. ]]
 local function spawnWave(count: number): ()
-	local spawns = getSpawnPoints()
-	if #spawns == 0 then
+	local all = getSpawnPoints()
+	if #all == 0 then
 		warn("[NGMIController] No NGMISpawn points found — cannot spawn wave")
 		return
 	end
 
-	for _ = 1, count do
-		local spawnPart = randomPick(spawns)
-		local spawnCF = spawnPart.CFrame + Vector3.new(
-			math.random(-3, 3),
-			0,
-			math.random(-3, 3)
-		)
-
-		local model = createNGMIModel(spawnCF)
-		registerNGMI(model)
+	for level = 0, 2 do
+		if workspace:GetAttribute("FloorSecured" .. level) then
+			continue -- a secured floor stays clear
+		end
+		local spawns = spawnsOnLevel(level)
+		if #spawns == 0 then
+			spawns = all
+		end
+		for _ = 1, count do
+			local spawnPart = randomPick(spawns)
+			local spawnCF = spawnPart.CFrame + Vector3.new(math.random(-3, 3), 0, math.random(-3, 3))
+			local data = registerNGMI(createNGMIModel(spawnCF))
+			data.agent.level = level
+		end
 	end
 
 	print(("[NGMIController] Spawned wave: %d NGMIs (total active: %d)"):format(
@@ -1311,7 +1537,7 @@ local function updateDifficulty(): ()
 		-- Update all existing NGMI walk speeds
 		for _, data in ngmiEntities do
 			if data.state == "PATROL" then
-				data.humanoid.WalkSpeed = getEffectiveSpeed()
+				data.humanoid.WalkSpeed = getPassiveSpeed()
 			elseif data.state == "CHASE" then
 				data.humanoid.WalkSpeed = getEffectiveSpeed() * CHASE_SPEED_MULT
 			end
@@ -1335,6 +1561,7 @@ local function cleanupAllNGMIs(): ()
 		end
 	end
 	ngmiEntities = {}
+	losFilterDirty = true
 	wavesSpawned = {}
 	difficultySpeed = 0
 	difficultyRange = 0
@@ -1356,9 +1583,22 @@ local function startNight2(): ()
 	print("[NGMIController] ═══ NIGHT 2 ACTIVATED ═══")
 
 	-- Main heartbeat loop: update all NGMI AI + check wave spawns
+	local directorTimer = 0
+	local released = false
+	local activatedAt = tick()
 	heartbeatConn = RunService.Heartbeat:Connect(function(dt: number)
 		if not isNight2Active then
 			return
+		end
+		-- Nothing in the building until the night's opening encounter has
+		-- played for everyone (NightEncounter sets NightReleased); the night's
+		-- clock, waves and pressure all start from then. Failsafe after 2 min.
+		if not released then
+			if not (workspace:GetAttribute("NightReleased") or tick() - activatedAt > 120) then
+				return
+			end
+			released = true
+			nightStartTime = tick()
 		end
 
 		-- Check for wave spawns
@@ -1366,6 +1606,17 @@ local function startNight2(): ()
 
 		-- Update difficulty scaling
 		updateDifficulty()
+
+		-- Re-deal corridor posts and stalkers
+		directorTimer += dt
+		if directorTimer >= DIRECTOR_INTERVAL then
+			directorTimer = 0
+			local agents = {}
+			for _, data in ngmiEntities do
+				table.insert(agents, data.agent)
+			end
+			Director.update(agents, tick() - nightStartTime)
+		end
 
 		-- Update each NGMI's state machine
 		for _, data in ngmiEntities do
@@ -1466,6 +1717,7 @@ DeodorantSpray.OnServerEvent:Connect(function(player: Player, targetModel: Insta
 		local model = targetModel :: Model
 		local pos = data.rootPart.Position
 		ngmiEntities[model] = nil
+		losFilterDirty = true
 		local poof = Instance.new("Explosion")
 		poof.Position = pos
 		poof.BlastRadius = 0
@@ -1499,4 +1751,21 @@ end)
 --------------------------------------------------------------------------------
 -- Initialization
 --------------------------------------------------------------------------------
+-- A blank NGMI body for client cutscenes to turn when no real NGMI exists yet
+-- (Cutscene/Encounter), so theirs is a pure style too. Plus one dressed
+-- hacker per crowd look for the night transition's cast, so that scene never
+-- depends on who happens to be in the venue (and never turns a named NPC).
+task.spawn(function()
+	local base = RigFactory.createBase()
+	base.Name = "NGMIBase"
+	base.Parent = ReplicatedStorage
+	local cast = Instance.new("Folder")
+	cast.Name = "CutsceneCast"
+	for i, m in RigFactory.createCast() do
+		m.Name = "Cast" .. i
+		m.Parent = cast
+	end
+	cast.Parent = ReplicatedStorage
+end)
+
 print("[NGMIController] Loaded — waiting for NIGHT2 phase")

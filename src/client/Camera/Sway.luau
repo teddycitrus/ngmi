@@ -69,6 +69,7 @@ local peekKeys = { left = false, right = false }
 local peekParams = RaycastParams.new()
 peekParams.FilterType = Enum.RaycastFilterType.Exclude
 peekParams.IgnoreWater = true
+local peekFilterChar: Model? = nil -- character the filter list was last built for
 
 --------------------------------------------------------------------------------
 -- Camera Sway
@@ -131,7 +132,8 @@ function Sway.start(isActive: () -> boolean)
 		local swayY = math.sin(swayPhase * math.pi * 4) * curAmpY * moveRatio
 
 		-- Turn lean: roll into the yaw rate. Yaw is unwrapped across the +/-pi seam.
-		local look = camera.CFrame.LookVector
+		local camCF = camera.CFrame
+		local look = camCF.LookVector
 		local yaw = math.atan2(-look.X, -look.Z)
 		local yawRate = 0
 		if lastYaw and dt > 0 then
@@ -151,9 +153,12 @@ function Sway.start(isActive: () -> boolean)
 		peekAmount += (peekInput - peekAmount) * (1 - math.exp(-PEEK_SMOOTH * dt))
 		local peekX = peekAmount * PEEK_OFFSET
 		if math.abs(peekX) > 0.01 then
-			peekParams.FilterDescendantsInstances = if character then { character } else {}
-			local side = camera.CFrame.RightVector * math.sign(peekX)
-			local hit = workspace:Raycast(camera.CFrame.Position, side * (math.abs(peekX) + PEEK_WALL_MARGIN), peekParams)
+			if character ~= peekFilterChar then
+				peekFilterChar = character
+				peekParams.FilterDescendantsInstances = if character then { character } else {}
+			end
+			local side = camCF.RightVector * math.sign(peekX)
+			local hit = workspace:Raycast(camCF.Position, side * (math.abs(peekX) + PEEK_WALL_MARGIN), peekParams)
 			if hit then
 				peekX = math.sign(peekX) * math.max(0, hit.Distance - PEEK_WALL_MARGIN)
 			end
@@ -161,7 +166,7 @@ function Sway.start(isActive: () -> boolean)
 		local peekY = -math.abs(peekAmount) * PEEK_DROP
 		local peekRoll = -peekAmount * PEEK_ROLL
 
-		camera.CFrame = camera.CFrame
+		camera.CFrame = camCF
 			* CFrame.new(swayX + peekX, swayY + peekY, 0)
 			* CFrame.Angles(0, 0, math.rad(roll + turnLean + peekRoll))
 	end)

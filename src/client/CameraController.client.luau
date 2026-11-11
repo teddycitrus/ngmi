@@ -57,6 +57,7 @@ local shakeIntensity: number = 0
 local shakeDuration: number = 0
 local shakeElapsed: number = 0
 local shakeConnection: RBXScriptConnection? = nil
+local shakeRng = Random.new()
 
 -- Cutscene state
 local cutsceneActive: boolean = false
@@ -127,15 +128,19 @@ local function shakeCamera(intensity: number, duration: number)
 			return
 		end
 
+		-- a cutscene camera holds still, so a relative nudge would pile up
+		if camera.CameraType == Enum.CameraType.Scriptable then
+			return
+		end
+
 		-- Intensity fades out linearly over the duration
 		local remaining = 1 - (shakeElapsed / shakeDuration)
 		local currentIntensity = shakeIntensity * remaining
 
 		-- Random rotational + translational offset
-		local rng = Random.new()
-		local offsetX = rng:NextNumber(-1, 1) * currentIntensity
-		local offsetY = rng:NextNumber(-1, 1) * currentIntensity
-		local roll = rng:NextNumber(-1, 1) * currentIntensity * 0.5
+		local offsetX = shakeRng:NextNumber(-1, 1) * currentIntensity
+		local offsetY = shakeRng:NextNumber(-1, 1) * currentIntensity
+		local roll = shakeRng:NextNumber(-1, 1) * currentIntensity * 0.5
 
 		camera.CFrame = camera.CFrame * CFrame.new(offsetX * 0.1, offsetY * 0.1, 0)
 			* CFrame.Angles(0, 0, math.rad(roll))
@@ -225,9 +230,30 @@ end
 -- Listens to the server's GameStateChanged remote to switch camera modes.
 --------------------------------------------------------------------------------
 
+local waitingForCutscene = false
+
 --- Apply the (always first-person) camera setup appropriate for a phase.
 --- Only the FOV and ambient effects differ between phases now.
 function applyCameraForPhase(phase: number)
+	-- A cutscene that holds the camera Scriptable (CutsceneManager's night
+	-- transition spans the switch to NIGHT2) owns it until it hands back.
+	-- Switching to Custom here, even for the one frame before the cutscene
+	-- reclaimed it, let the default camera snap to the player's head, and the
+	-- shot then stayed on the player's POV until the next cut. Apply the
+	-- current phase's setup once the cutscene restores the camera instead.
+	if camera.CameraType == Enum.CameraType.Scriptable and not cutsceneActive then
+		if not waitingForCutscene then
+			waitingForCutscene = true
+			task.spawn(function()
+				while camera.CameraType == Enum.CameraType.Scriptable do
+					camera:GetPropertyChangedSignal("CameraType"):Wait()
+				end
+				waitingForCutscene = false
+				applyCameraForPhase(currentPhase)
+			end)
+		end
+		return
+	end
 	-- LOBBY (phase 0) is the matchmaking menu — keep the cursor free.
 	if phase == 0 then
 		enterLobbyCamera()

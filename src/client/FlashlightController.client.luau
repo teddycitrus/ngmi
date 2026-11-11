@@ -25,10 +25,13 @@ local playerGui = player:WaitForChild("PlayerGui")
 -- CONFIGURATION
 -- ============================================================
 local CONFIG = {
-	spotAngle = 45,
-	spotRange = 42,
-	brightness = 2,
-	color = Color3.fromRGB(255, 245, 225),
+	-- A point light from the camera (Flashlight/Rig). It lights everything
+	-- around the player out to `range`, then fades over a fringe beyond it;
+	-- without it only the rig's short glow is left, a few studs. A dull warm
+	-- tint, like a phone LED through a scuffed cover, not a white torch.
+	range = 13,
+	brightness = 2.2,
+	color = Color3.fromRGB(236, 204, 148),
 	batteryMax = 100,
 	-- A full charge lasts 80 seconds (100 / 1.25). There is NO passive
 	-- recharge, the only way to top up is to consume a Battery item.
@@ -36,9 +39,6 @@ local CONFIG = {
 	lowBatteryThreshold = 20,
 	reactivateThreshold = 10,
 	emfInterferenceRange = 25,
-	-- How solid the visible shaft is at its source. Subtle on purpose; a dense
-	-- cone reads as fog rather than a torch.
-	coneTransparency = 0.9,
 	toggleKey = Enum.KeyCode.F,
 }
 
@@ -49,9 +49,8 @@ local isNight2 = false
 local flashlightOn = false
 local battery = CONFIG.batteryMax
 local batteryDead = false
-local spotlight: SpotLight? = nil
+local spotlight: PointLight? = nil
 local blinkUntil = 0 -- os.clock() until which a battery blink holds the light dark
-local coneBeam: Beam? = nil
 local emitterPart: Part? = nil
 local updateConnection: RBXScriptConnection? = nil
 local mobileButton: TextButton? = nil
@@ -67,14 +66,12 @@ local toggleFlashlight: () -> ()
 -- ============================================================
 local function destroyRig()
 	Rig.destroy()
-	emitterPart, spotlight, coneBeam = nil, nil, nil
+	emitterPart, spotlight = nil, nil
 end
 
 local function createRig()
-	local parts = Rig.create(CONFIG, function()
-		return flashlightOn
-	end)
-	emitterPart, spotlight, coneBeam = parts.emitter, parts.light, parts.cone
+	local parts = Rig.create(CONFIG)
+	emitterPart, spotlight = parts.emitter, parts.light
 end
 
 -- ============================================================
@@ -156,6 +153,16 @@ end
 -- ============================================================
 -- TOGGLE LOGIC
 -- ============================================================
+-- Fires AudioManager's switch click. Looked up per press so load order between
+-- the two LocalScripts doesn't matter.
+local function playClick(isOn: boolean)
+	local audio = script.Parent:FindFirstChild("AudioManager")
+	local event = audio and audio:FindFirstChild("PlayFlashlightClick")
+	if event and event:IsA("BindableEvent") then
+		event:Fire(isOn)
+	end
+end
+
 function toggleFlashlight()
 	if not isNight2 then
 		return
@@ -164,8 +171,10 @@ function toggleFlashlight()
 	if not flashlightOn then
 		-- Turn on
 		if batteryDead and battery < CONFIG.reactivateThreshold then
+			playClick(true) -- The switch still clicks; the dead cell just gives nothing
 			return -- Must recharge first
 		end
+		playClick(true)
 		batteryDead = false
 		flashlightOn = true
 
@@ -174,21 +183,16 @@ function toggleFlashlight()
 		end
 		if spotlight then
 			spotlight.Enabled = true
-			if coneBeam then
-				coneBeam.Enabled = true
-			end
 		end
 
 		-- Update mobile button
 		setMobileButtonState("on")
 	else
 		-- Turn off
+		playClick(false)
 		flashlightOn = false
 		if spotlight then
 			spotlight.Enabled = false
-			if coneBeam then
-				coneBeam.Enabled = false
-			end
 		end
 
 		setMobileButtonState("off")
@@ -201,9 +205,21 @@ end
 -- UPDATE LOOP
 -- ============================================================
 local flickerAccum = 0
-local wasBlinking = false
-local CONE_DEFAULT = Rig.coneRamp(CONFIG.coneTransparency)
-local CONE_HIDDEN = NumberSequence.new(1)
+-- the battery level the meter last showed; the meter only changes with it
+local shownBattery: number? = nil
+
+-- Live mirror of GetTagged("NGMI"), so the per-frame EMF check does not
+-- allocate a fresh array every frame.
+local ngmiSet: { [Instance]: true } = {}
+for _, ngmi in CollectionService:GetTagged("NGMI") do
+	ngmiSet[ngmi] = true
+end
+CollectionService:GetInstanceAddedSignal("NGMI"):Connect(function(ngmi)
+	ngmiSet[ngmi] = true
+end)
+CollectionService:GetInstanceRemovedSignal("NGMI"):Connect(function(ngmi)
+	ngmiSet[ngmi] = nil
+end)
 
 local function startUpdateLoop()
 	updateConnection = RunService.Heartbeat:Connect(function(dt: number)
@@ -220,9 +236,6 @@ local function startUpdateLoop()
 				if spotlight then
 					spotlight.Enabled = false
 				end
-				if coneBeam then
-					coneBeam.Enabled = false
-				end
 				setMobileButtonState("dead")
 			end
 		end
@@ -230,7 +243,8 @@ local function startUpdateLoop()
 		-- is consumed (see FlashlightRecharge below).
 
 		-- Update battery UI
-		if batteryFill then
+		if batteryFill and battery ~= shownBattery then
+			shownBattery = battery
 			local pct = battery / CONFIG.batteryMax
 			batteryFill.Size = UDim2.new(pct, 0, 1, 0)
 			local color = if pct > 0.5
@@ -277,21 +291,13 @@ local function startUpdateLoop()
 			end
 			spotlight.Brightness = baseBrightness
 
-			-- Hide the visible shaft for the length of a blink. Only written on
-			-- the edge so it doesn't stomp the EMF stutter's own shaft dimming.
-			local blinking = now < blinkUntil
-			if coneBeam and blinking ~= wasBlinking then
-				coneBeam.Transparency = if blinking then CONE_HIDDEN else CONE_DEFAULT
-			end
-			wasBlinking = blinking
-
 			-- NGMI EMF interference
 			local character = player.Character
 			if character then
 				local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 				if rootPart then
 					local nearestDist = math.huge
-					for _, ngmi in CollectionService:GetTagged("NGMI") do
+					for ngmi in ngmiSet do
 						if ngmi:IsA("Model") then
 							local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
 							if ngmiRoot and ngmiRoot:IsA("BasePart") then
@@ -316,19 +322,9 @@ local function startUpdateLoop()
 								)
 								spotlight.Brightness = math.random() * baseBrightness * 0.3
 								spotlight.Color = sickly
-								-- Drag the visible shaft down with the beam so the
-								-- cone doesn't stay bright while the light stutters.
-								if coneBeam then
-									coneBeam.Color = ColorSequence.new(sickly)
-									coneBeam.Transparency = NumberSequence.new(0.97)
-								end
 							else
 								spotlight.Brightness = baseBrightness
 								spotlight.Color = CONFIG.color
-								if coneBeam then
-									coneBeam.Color = ColorSequence.new(CONFIG.color)
-									coneBeam.Transparency = Rig.coneRamp(CONFIG.coneTransparency)
-								end
 							end
 						end
 					else
@@ -407,13 +403,8 @@ player.CharacterAdded:Connect(function()
 	if not emitterPart or not emitterPart.Parent then
 		createRig()
 	end
-	if flashlightOn then
-		if spotlight then
-			spotlight.Enabled = true
-		end
-		if coneBeam then
-			coneBeam.Enabled = true
-		end
+	if flashlightOn and spotlight then
+		spotlight.Enabled = true
 	end
 end)
 

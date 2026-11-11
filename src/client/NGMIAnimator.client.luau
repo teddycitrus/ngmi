@@ -23,8 +23,10 @@
 --     with both hands out.
 --   * Sprayed: a violent recoil, arms up over the face, then a cowering run.
 --
--- Underneath everything sits NGMIMutation.TWIST, the same skeletal deformity
--- the night transition folds into the turned hackers.
+-- Underneath everything sits the NGMI's style twist (NGMIMutation.twistOf),
+-- the same skeletal deformity the night transition folds into the turned
+-- hackers, weighted by how far its mutation has come. The style also sets the
+-- constant tremor and how often the stop-motion stutter hits.
 --
 -- NGMIs farther than CULL_DISTANCE from the camera are not posed at all.
 --------------------------------------------------------------------------------
@@ -35,6 +37,7 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local RigPose = require(Shared:WaitForChild("RigPose"))
+local NGMIFit = require(Shared:WaitForChild("NGMIFit"))
 local NGMIMutation = require(Shared:WaitForChild("NGMIMutation"))
 local NGMIVoice = require(script.Parent:WaitForChild("NGMIVoice"))
 local Poses = require(script.Parent:WaitForChild("NGMI"):WaitForChild("Poses"))
@@ -98,6 +101,8 @@ local function register(model: Model)
 	if next(poser.J) == nil then
 		return
 	end
+	-- arms hang at the thighs on this body, so the poses read as written
+	NGMIFit.armsIn(poser)
 	if not model:IsDescendantOf(workspace) then
 		return
 	end
@@ -107,6 +112,7 @@ local function register(model: Model)
 		model = model,
 		root = root,
 		rig = poser,
+		style = NGMIMutation.styleOf(model),
 		voice = NGMIVoice.attach(model),
 		seed = rng:NextNumber(0, 1000),
 		gait = rng:NextNumber(0, math.pi * 2),
@@ -187,7 +193,7 @@ local function updateRig(r: Rig, dt: number, now: number, camDist: number)
 	local attacking = r.attackKind ~= nil and attackT < 1.6
 	if now >= r.nextStutter then
 		r.stutterUntil = now + rng:NextNumber(0.25, 0.6)
-		r.nextStutter = r.stutterUntil + rng:NextNumber(STUTTER_MIN_GAP, STUTTER_MAX_GAP)
+		r.nextStutter = r.stutterUntil + rng:NextNumber(STUTTER_MIN_GAP, STUTTER_MAX_GAP) / r.style.stutter
 		r.freezing = rng:NextNumber() < FREEZE_CHANCE
 	end
 	if now < r.stutterUntil and not attacking then
@@ -269,7 +275,8 @@ local function updateRig(r: Rig, dt: number, now: number, camDist: number)
 		sharp = 30
 	end
 
-	pose = add(add(pose, NGMIMutation.TWIST), Poses.tremor(r, now, 2.5, 4))
+	local tremor = r.style.tremor
+	pose = add(add(pose, NGMIMutation.twistOf(r.model)), Poses.tremor(r, now, tremor[1], tremor[2]))
 	r.rig:apply(pose, dt, sharp)
 end
 

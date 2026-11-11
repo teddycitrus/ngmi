@@ -124,43 +124,44 @@ local Profiles: { [string]: LightingProfile } = {}
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
--- LOBBY: the queue menu backdrop. Same clinical university fluorescent
--- family as DAY1 but flatter, since a full-screen GUI sits over it and
--- bloom behind text just reads as mush.
+-- LOBBY: the queue menu backdrop, the hall seen from the plaza in a night
+-- storm (client/Lobby/Backdrop adds the rain and lightning). Cold and wet:
+-- a low blue ambient, rain haze swallowing the skyline, and enough bloom
+-- that the lit windows and plaza lamps are the warm points in the frame.
 ----------------------------------------------------------------------
 Profiles.LOBBY = {
-	Ambient = Color3.fromRGB(28, 28, 32),
-	Brightness = 2,
-	ClockTime = 18,
+	Ambient = Color3.fromRGB(18, 20, 28),
+	Brightness = 0.4,
+	ClockTime = 0.4,
 	ColorShift_Bottom = Color3.fromRGB(0, 0, 0),
-	ColorShift_Top = Color3.fromRGB(10, 8, 4),
-	ExposureCompensation = -0.2,
-	FogColor = Color3.fromRGB(116, 116, 120),
-	FogEnd = 420,
-	FogStart = 60,
-	OutdoorAmbient = Color3.fromRGB(60, 62, 70),
-	ShadowSoftness = 0.2,
-	EnvironmentDiffuseScale = 0.25,
-	EnvironmentSpecularScale = 0.6,
+	ColorShift_Top = Color3.fromRGB(0, 0, 0),
+	ExposureCompensation = 0.1,
+	FogColor = Color3.fromRGB(22, 26, 34),
+	FogEnd = 600,
+	FogStart = 40,
+	OutdoorAmbient = Color3.fromRGB(52, 58, 78),
+	ShadowSoftness = 0.4,
+	EnvironmentDiffuseScale = 0.2,
+	EnvironmentSpecularScale = 1,
 	Atmosphere = {
-		Density = 0.08,
-		Offset = 0.1,
-		Color = Color3.fromRGB(156, 156, 162),
-		Decay = Color3.fromRGB(88, 90, 98),
-		Glare = 0.03,
-		Haze = 0.2,
+		Density = 0.36,
+		Offset = 0.08,
+		Color = Color3.fromRGB(48, 54, 68),
+		Decay = Color3.fromRGB(26, 30, 40),
+		Glare = 0,
+		Haze = 1.8,
 	},
 	PostProcessing = {
 		ColorCorrection = {
 			Brightness = 0,
-			Contrast = 0.03,
-			Saturation = 0,
-			TintColor = Color3.fromRGB(255, 252, 246),
+			Contrast = 0.12,
+			Saturation = -0.22,
+			TintColor = Color3.fromRGB(206, 214, 236),
 		},
 		Bloom = {
-			Intensity = 0.11,
-			Size = 20,
-			Threshold = 1.3,
+			Intensity = 0.45,
+			Size = 24,
+			Threshold = 1.1,
 		},
 		BlurSize = 0,
 	},
@@ -341,8 +342,11 @@ Profiles.NIGHT2 = {
 	},
 	PostProcessing = {
 		ColorCorrection = {
-			Brightness = -0.18,
-			Contrast = 0.38,
+			-- Mild on purpose. At -0.18 / 0.38 the grade crushed every dim
+			-- value to black, so each light ended in a hard ring instead of
+			-- fading out; the blackout itself comes from the near-zero Ambient.
+			Brightness = -0.08,
+			Contrast = 0.22,
 			Saturation = -0.6,
 			-- Neutral cold wash. The blood-red proximity tint is layered on top
 			-- by NGMIClient's own effect, so it only appears when one is close.

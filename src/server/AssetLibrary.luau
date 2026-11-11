@@ -94,6 +94,31 @@ function AssetLibrary.clone(name: string, pivot: CFrame?): Model?
 	return c :: Model
 end
 
+--- Copy templates into ReplicatedStorage.<folderName> for client-only sets
+--- (the night transition cutscene dresses its lounge from them). The copies
+--- carry no CollectionService tags, so venue systems never pick them up, and
+--- their Seats are disabled.
+function AssetLibrary.publish(names: { string }, folderName: string)
+	local CollectionService = game:GetService("CollectionService")
+	local folder = ReplicatedStorage:FindFirstChild(folderName) or Instance.new("Folder")
+	folder.Name = folderName
+	for _, name in names do
+		local c = if folder:FindFirstChild(name) then nil else AssetLibrary.clone(name)
+		if c then
+			for _, d in c:GetDescendants() do
+				for _, tagName in CollectionService:GetTags(d) do
+					CollectionService:RemoveTag(d, tagName)
+				end
+				if d:IsA("Seat") then
+					d.Disabled = true
+				end
+			end
+			c.Parent = folder
+		end
+	end
+	folder.Parent = ReplicatedStorage
+end
+
 --- Drop the cached templates (used by the edit-mode preview so a rebuild
 --- picks up template changes).
 function AssetLibrary.reset()

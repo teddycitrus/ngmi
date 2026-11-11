@@ -97,14 +97,19 @@ local FULL_COLOR = UITheme.Color.Text
 local LOW_COLOR = UITheme.Color.Danger
 local SPRINT_COLOR = UITheme.Color.Warn
 
+local shownPct: number? = nil -- last value written to the fill and the attribute
+
 local function updateBar()
 	local pct = math.clamp(energy / MAX_ENERGY, 0, 1)
-	barFill.Size = UDim2.new(pct, 0, 1, 0)
+	if pct ~= shownPct then
+		shownPct = pct
+		barFill.Size = UDim2.new(pct, 0, 1, 0)
 
-	-- Publish alongside the existing "Sprinting" attribute so other client systems
-	-- (HUDController's heartbeat vignette) can read exhaustion without duplicating
-	-- the sprint model or reaching into this script.
-	player:SetAttribute("Energy", pct)
+		-- Publish alongside the existing "Sprinting" attribute so other client systems
+		-- (HUDController's heartbeat vignette) can read exhaustion without duplicating
+		-- the sprint model or reaching into this script.
+		player:SetAttribute("Energy", pct)
+	end
 
 	if pct < 0.25 then
 		barFill.BackgroundColor3 = LOW_COLOR

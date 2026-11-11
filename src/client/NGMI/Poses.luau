@@ -11,6 +11,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local RigPose = require(Shared:WaitForChild("RigPose"))
 local GameConfig = require(Shared:WaitForChild("GameConfig"))
+local NGMIMutation = require(Shared:WaitForChild("NGMIMutation"))
 local NGMIVoice = require(script.Parent.Parent:WaitForChild("NGMIVoice"))
 
 type Pose = RigPose.Pose
@@ -26,6 +27,7 @@ export type Rig = {
 	model: Model,
 	root: BasePart,
 	rig: RigPose.Rig,
+	style: NGMIMutation.Style,
 	voice: NGMIVoice.Voice?,
 	seed: number,
 	gait: number,
@@ -61,16 +63,14 @@ function Poses.window(t: number, len: number): number
 end
 
 function Poses.tremor(r: Rig, t: number, deg: number, hz: number): Pose
-	local function n(c: number): number
-		return noise(r.seed, c, t * hz) * deg
-	end
+	local seed, th = r.seed, t * hz
 	return {
-		waist = V(n(1), n(2), n(3)) * 0.4,
-		neck = V(n(4), n(5), n(6)),
-		rS = V(n(7), 0, n(8)),
-		lS = V(n(9), 0, n(10)),
-		rE = V(n(11), 0, 0),
-		lE = V(n(12), 0, 0),
+		waist = V(noise(seed, 1, th) * deg, noise(seed, 2, th) * deg, noise(seed, 3, th) * deg) * 0.4,
+		neck = V(noise(seed, 4, th) * deg, noise(seed, 5, th) * deg, noise(seed, 6, th) * deg),
+		rS = V(noise(seed, 7, th) * deg, 0, noise(seed, 8, th) * deg),
+		lS = V(noise(seed, 9, th) * deg, 0, noise(seed, 10, th) * deg),
+		rE = V(noise(seed, 11, th) * deg, 0, 0),
+		lE = V(noise(seed, 12, th) * deg, 0, 0),
 	}
 end
 
@@ -139,9 +139,12 @@ function Poses.stance(t: number): Pose
 	}
 end
 
+local MIRROR_SWAP: { [string]: string } =
+	{ rS = "lS", lS = "rS", rE = "lE", lE = "rE", rW = "lW", lW = "rW", rH = "lH", lH = "rH", rK = "lK", lK = "rK" }
+
 function Poses.mirror(p: Pose): Pose
 	local out: Pose = {}
-	local swap = { rS = "lS", lS = "rS", rE = "lE", lE = "rE", rW = "lW", lW = "rW", rH = "lH", lH = "rH", rK = "lK", lK = "rK" }
+	local swap = MIRROR_SWAP
 	for key, v in p do
 		local to = swap[key] or key
 		if key == "rootPos" then
@@ -185,6 +188,10 @@ local SWIPE_HIT: Pose = {
 	lK = V(18, 0, 0),
 	rootPos = V(0, -0.6, -0.5),
 }
+-- Left-hand swipe keys, mirrored once. Never mutated: the blend and add
+-- below always build new tables.
+local SWIPE_LOAD_L = Poses.mirror(SWIPE_LOAD)
+local SWIPE_HIT_L = Poses.mirror(SWIPE_HIT)
 local LUNGE_LOAD: Pose = {
 	rH = V(-62, 0, 10),
 	lH = V(-54, 0, -10),
@@ -223,7 +230,7 @@ function Poses.attackPose(r: Rig, t: number, now: number): Pose?
 	if kind == "lunge" then
 		load, hit = LUNGE_LOAD, LUNGE_HIT
 	elseif kind == "swipe_l" then
-		load, hit = Poses.mirror(SWIPE_LOAD), Poses.mirror(SWIPE_HIT)
+		load, hit = SWIPE_LOAD_L, SWIPE_HIT_L
 	else
 		load, hit = SWIPE_LOAD, SWIPE_HIT
 	end

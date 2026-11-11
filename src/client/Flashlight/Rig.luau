@@ -1,14 +1,20 @@
 --!strict
 --------------------------------------------------------------------------------
 -- Flashlight/Rig.luau
--- The camera-tracked flashlight rig for FlashlightController: an invisible
--- emitter part held just in front of the camera, a SpotLight spill plus a
--- narrower hotspot, and a visible light shaft (a camera-facing Beam) that is
--- trimmed every frame so it stops short of whatever it points at.
+-- The Night 2 light rig for FlashlightController, centred on the camera:
 --
--- A first-person flashlight should light the cone the player is facing,
--- originating from them. The SpotLight casts exactly that cone (no particles),
--- aimed wherever the player looks, pitch included.
+--   Glow   always on in the blackout. A short, dim point light, so with no
+--          flashlight the player still sees a few studs around them (the
+--          floor at their feet, the wall they are touching) and nothing past.
+--   Light  the phone flashlight. A point light radiating from the camera with
+--          a much longer reach, so switching it on pushes the visible area
+--          out in every direction. Losing it is a setback, not a death.
+--
+-- Both sit on one invisible emitter that rides just in front of the camera,
+-- clamped by a ray so it never ends up on the far side of a wall the player
+-- is pressed against. While the light sits inside the player's head, the
+-- character would shadow it, so the local character casts no shadows while
+-- the rig exists (a local change; other players are unaffected).
 --------------------------------------------------------------------------------
 
 local Players = game:GetService("Players")
@@ -17,66 +23,81 @@ local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 export type Config = {
-	spotAngle: number,
-	spotRange: number,
+	range: number, -- the core light; its fringe tiers reach FRINGE[#FRINGE].scale times further
 	brightness: number,
 	color: Color3,
-	coneTransparency: number,
 }
-export type Parts = { emitter: Part, light: SpotLight, cone: Beam }
+export type Parts = { emitter: Part, light: PointLight }
 
 local Rig = {}
 
---- The visible shaft, in studs from the emitter.
----   CONE_START  the shaft does not begin at the lens. The emitter rides one stud
----               in front of the camera, and a FaceCamera beam whose first vertex
----               is that close billboards into a flat translucent slab pasted
----               across a corner of the screen.
----   CONE_MAX    a Beam is a flat quad, and a big one hanging in open air reads as
----               a shape rather than as haze. A short shaft near the player sells a
----               torch; the SpotLight does the far work.
----   CONE_MARGIN how far short of whatever it hits the shaft stops. Without this
----               the quad passes THROUGH the wall and its intersection with the
----               surface draws a hard diagonal edge across the lit pool, which is
----               the artefact that made this look broken in the first place.
-local CONE_START = 4
-local CONE_MAX = 16
-local CONE_MARGIN = 2.5
+-- The bare-eyes glow. Tuned in Play against the Night 2 grade, which crushes
+-- anything dim (at brightness 0.9 nothing showed at all).
+local GLOW_RANGE = 5
+local GLOW_BRIGHTNESS = 2.2
+local GLOW_COLOR = Color3.fromRGB(176, 186, 214)
 
---- Falloff. A real torch has a tight bright hotspot inside a dimmer spill. The
---- outer SpotLight is the spill; a second, narrower SpotLight on the same
---- emitter is the hotspot. It mirrors the outer light's state every frame, so
---- every existing on / off / flicker branch drives both without knowing.
-local HOTSPOT_ANGLE = 18
-local HOTSPOT_RANGE_SCALE = 0.85
-local HOTSPOT_BRIGHTNESS_RATIO = 0.9
+-- A single PointLight dies at its Range in a visible ring. Each light gets a
+-- stack of dimmer, wider copies on the same emitter, each tier reaching
+-- further at a fraction of the brightness, so the edge tails off over many
+-- studs (a rough inverse-square falloff) instead of stopping. One wider twin
+-- still left a second, softer ring; three tiers blend it out. The copies
+-- mirror their light every frame (on, colour, and brightness scaled by their
+-- ratio), so the controller's battery sag and flicker drive them all.
+local FRINGE = {
+	{ scale = 1.4, ratio = 0.4 },
+	{ scale = 1.85, ratio = 0.18 },
+	{ scale = 2.3, ratio = 0.07 },
+}
 
---- Follow delay. The beam's ROTATION trails the camera with exponential
---- smoothing, so a fast flick leaves the light a few frames behind, like a hand
---- catching up with the eyes. Position stays locked to the camera so the light
---- never detaches from the player. A faint Perlin wobble sells a held object.
-local FOLLOW_SHARPNESS = 16
-local HAND_WOBBLE_DEG = 0.35
-local HOLD_OFFSET = CFrame.new(0.4, -0.6, -1)
-
---- Transparency profile along the shaft. Fades in from nothing at the near end so
---- there is no hard leading edge, and out to nothing at the far end so the widest
---- part of the quad (where its side edges would show) is invisible.
-function Rig.coneRamp(peak: number): NumberSequence
-	return NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 1),
-		NumberSequenceKeypoint.new(0.15, peak),
-		NumberSequenceKeypoint.new(0.45, math.min(peak + 0.05, 1)),
-		NumberSequenceKeypoint.new(1, 1),
-	})
+--- Copies of `light` for every fringe tier, parented next to it.
+local function fringeTiers(light: PointLight): { PointLight }
+	local out = {}
+	for i, tier in FRINGE do
+		local f = light:Clone()
+		f.Name = light.Name .. "Fringe" .. i
+		f.Range = math.min(light.Range * tier.scale, 60)
+		f.Brightness = light.Brightness * tier.ratio
+		f.Parent = light.Parent
+		table.insert(out, f)
+	end
+	return out
 end
 
+local HOLD_OFFSET = Vector3.new(0, -0.1, -0.6)
+local WALL_CLEARANCE = 0.25 -- studs kept between the emitter and a surface
+
 local emitterPart: Part? = nil
-local spotlight: SpotLight? = nil
-local hotspot: SpotLight? = nil
-local coneBeam: Beam? = nil
-local lagRotation: CFrame? = nil
 local renderConn: RBXScriptConnection? = nil
+local shadowed: { [BasePart]: boolean } = {}
+local shadowChar: Model? = nil
+
+local function restoreShadows()
+	for part, was in shadowed do
+		if part.Parent then
+			part.CastShadow = was
+		end
+	end
+	table.clear(shadowed)
+	shadowChar = nil
+end
+
+local function hideCharacterShadows(char: Model?)
+	if char == shadowChar then
+		return
+	end
+	restoreShadows()
+	shadowChar = char
+	if not char then
+		return
+	end
+	for _, d in char:GetDescendants() do
+		if d:IsA("BasePart") then
+			shadowed[d] = d.CastShadow
+			d.CastShadow = false
+		end
+	end
+end
 
 function Rig.destroy()
 	if renderConn then
@@ -87,15 +108,12 @@ function Rig.destroy()
 		emitterPart:Destroy()
 		emitterPart = nil
 	end
-	spotlight = nil
-	hotspot = nil
-	lagRotation = nil
-	coneBeam = nil
+	restoreShadows()
 end
 
---- Build the rig. `config` is FlashlightController's CONFIG; `isOn` says
---- whether the light is switched on (the shaft is only traced while it is).
-function Rig.create(config: Config, isOn: () -> boolean): Parts
+--- Build the rig. `config` is FlashlightController's CONFIG; the flashlight
+--- starts switched off, the glow starts on.
+function Rig.create(config: Config): Parts
 	Rig.destroy()
 
 	local e = Instance.new("Part")
@@ -110,136 +128,71 @@ function Rig.create(config: Config, isOn: () -> boolean): Parts
 	e.Parent = workspace
 	emitterPart = e
 
-	-- A SpotLight casts exactly the cone of illumination we want, origin at the
-	-- emitter, fanning out along its front face. No visible particles; it just lights
-	-- whatever surfaces fall inside the cone.
-	local light = Instance.new("SpotLight")
+	local glow = Instance.new("PointLight")
+	glow.Name = "Glow"
+	glow.Range = GLOW_RANGE
+	glow.Brightness = GLOW_BRIGHTNESS
+	glow.Color = GLOW_COLOR
+	-- No shadows: the reach is too short to leak anywhere the player can see.
+	glow.Shadows = false
+	glow.Parent = e
+	fringeTiers(glow)
+
+	local light = Instance.new("PointLight")
 	light.Name = "PhoneFlashlight"
-	light.Angle = config.spotAngle
-	light.Range = config.spotRange
+	light.Range = config.range
 	light.Brightness = config.brightness
 	light.Color = config.color
-	light.Face = Enum.NormalId.Front
-	-- Real shadows. The property is `Shadows` on a Light (CastShadow is the
-	-- BasePart one). Under Future this is what makes the beam get *occluded* by
-	-- desks and doorframes instead of bleeding through them.
+	-- Shadows keep it from lighting the next room through the wall.
 	light.Shadows = true
 	light.Enabled = false
 	light.Parent = e
-	spotlight = light
+	local fringes = fringeTiers(light)
 
-	local hot = Instance.new("SpotLight")
-	hot.Name = "PhoneFlashlightHotspot"
-	hot.Angle = HOTSPOT_ANGLE
-	hot.Range = config.spotRange * HOTSPOT_RANGE_SCALE
-	hot.Brightness = config.brightness * HOTSPOT_BRIGHTNESS_RATIO
-	hot.Color = config.color
-	hot.Face = Enum.NormalId.Front
-	hot.Shadows = true
-	hot.Enabled = false
-	hot.Parent = e
-	hotspot = hot
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
 
-	-- Visible light shaft. Roblox has no true volumetrics, so the shaft is a
-	-- camera-facing Beam stretched down the cone: LightInfluence 0 + LightEmission 1
-	-- make it self-lit, and the transparency ramp fades it out with distance so it
-	-- reads as haze catching the light rather than a solid wedge.
-	--
-	-- The shaft deliberately does NOT start at the emitter. The emitter rides one
-	-- stud in front of the camera, and a FaceCamera beam whose first vertex is that
-	-- close billboards into a flat translucent slab pasted across a corner of the
-	-- screen (it was offset to the lower right, following the emitter's held-torch
-	-- offset). Starting it CONE_START studs out puts the near edge past the point
-	-- where it can turn edge-on, and the ramp fades it in from nothing so there is
-	-- no hard leading edge either.
-	local a0 = Instance.new("Attachment")
-	a0.Name = "ConeOrigin"
-	a0.Position = Vector3.new(0, 0, -CONE_START)
-	a0.Parent = e
+	-- What the fringes and the ray filter were last set from; nothing else
+	-- writes them, so an unchanged source means nothing to write.
+	local mirroredEnabled: boolean? = nil
+	local mirroredBrightness: number? = nil
+	local mirroredColor: Color3? = nil
+	local filterChar: Model | false | nil = false
 
-	local a1 = Instance.new("Attachment")
-	a1.Name = "ConeEnd"
-	-- Starts at the cap, not at spotRange: the render loop trims it in from here.
-	a1.Position = Vector3.new(0, 0, -CONE_MAX)
-	a1.Parent = e
-
-	-- SpotLight.Angle is the FULL cone angle, so the spread at distance d is
-	-- 2 * d * tan(angle / 2). Both ends are measured that way so the shaft matches
-	-- the cone the SpotLight actually lights.
-	local halfAngle = math.rad(config.spotAngle * 0.5)
-	local spread = 2 * math.tan(halfAngle)
-
-	local beam = Instance.new("Beam")
-	beam.Name = "FlashlightCone"
-	beam.Attachment0 = a0
-	beam.Attachment1 = a1
-	beam.Width0 = CONE_START * spread
-	beam.Width1 = CONE_MAX * spread
-	beam.FaceCamera = true
-	beam.LightInfluence = 0
-	beam.LightEmission = 1
-	beam.Color = ColorSequence.new(config.color)
-	beam.Transparency = Rig.coneRamp(config.coneTransparency)
-	-- One segment is a single quad, which hinges visibly as you turn. Enough
-	-- segments to read as a taper instead.
-	beam.Segments = 12
-	beam.Enabled = false
-	beam.Parent = e
-	coneBeam = beam
-
-	local coneParams = RaycastParams.new()
-	coneParams.FilterType = Enum.RaycastFilterType.Exclude
-	coneParams.IgnoreWater = true
-
-	-- Track the camera every frame so the cone points exactly where the player looks,
-	-- nudged forward + down so it reads as a held light originating from the player,
-	-- and trim the shaft so it stops short of whatever it is pointed at.
-	renderConn = RunService.RenderStepped:Connect(function(dt: number)
+	renderConn = RunService.RenderStepped:Connect(function()
 		local cam = workspace.CurrentCamera
 		if not (emitterPart and cam) then
 			return
 		end
-
-		-- Lagged aim: rotation chases the camera, position does not lag.
-		local target = cam.CFrame * HOLD_OFFSET
-		local alpha = 1 - math.exp(-FOLLOW_SHARPNESS * dt)
-		local rotation = if lagRotation then lagRotation:Lerp(target.Rotation, alpha) else target.Rotation
-		lagRotation = rotation
-		local t = os.clock()
-		local wobble = CFrame.Angles(
-			math.rad(math.noise(t * 0.7, 3.1) * HAND_WOBBLE_DEG),
-			math.rad(math.noise(t * 0.6, 8.7) * HAND_WOBBLE_DEG),
-			0
-		)
-		emitterPart.CFrame = CFrame.new(target.Position) * rotation * wobble
-
-		-- Hotspot mirrors the spill light's state (see HOTSPOT_* above).
-		if hotspot and spotlight then
-			hotspot.Enabled = spotlight.Enabled
-			hotspot.Brightness = spotlight.Brightness * HOTSPOT_BRIGHTNESS_RATIO
-			hotspot.Color = spotlight.Color
+		-- A cutscene owns a Scriptable camera; lights riding it would light the
+		-- cutscene set, so the rig is pulled out until gameplay has the camera.
+		emitterPart.Parent = if cam.CameraType == Enum.CameraType.Scriptable then nil else workspace
+		local character = player.Character
+		hideCharacterShadows(character)
+		local enabled, brightness, color = light.Enabled, light.Brightness, light.Color
+		if enabled ~= mirroredEnabled or brightness ~= mirroredBrightness or color ~= mirroredColor then
+			mirroredEnabled, mirroredBrightness, mirroredColor = enabled, brightness, color
+			for i, f in fringes do
+				f.Enabled = enabled
+				f.Brightness = brightness * FRINGE[i].ratio
+				f.Color = color
+			end
 		end
 
-		if not (coneBeam and a1 and isOn()) then
-			return
+		local camCF = cam.CFrame
+		local eye = camCF.Position
+		local reach = camCF:VectorToWorldSpace(HOLD_OFFSET)
+		if character ~= filterChar then
+			filterChar = character
+			params.FilterDescendantsInstances = { emitterPart, character }
 		end
-
-		coneParams.FilterDescendantsInstances = { emitterPart, player.Character }
-		local hit = workspace:Raycast(emitterPart.Position, emitterPart.CFrame.LookVector * CONE_MAX, coneParams)
-		local reach = if hit then hit.Distance - CONE_MARGIN else CONE_MAX
-
-		if reach <= CONE_START + 1 then
-			-- Pressed up against something: there is no room for a shaft, and any
-			-- quad here would just be a bright smear on the surface.
-			coneBeam.Enabled = false
-			return
-		end
-		coneBeam.Enabled = true
-		a1.Position = Vector3.new(0, 0, -reach)
-		coneBeam.Width1 = reach * spread
+		local block = workspace:Raycast(eye, reach, params)
+		local dist = if block then math.max(0, block.Distance - WALL_CLEARANCE) else reach.Magnitude
+		emitterPart.CFrame = CFrame.new(eye + reach.Unit * dist)
 	end)
 
-	return { emitter = e, light = light, cone = beam }
+	return { emitter = e, light = light }
 end
 
 return Rig

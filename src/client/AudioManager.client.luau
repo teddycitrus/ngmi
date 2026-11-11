@@ -7,7 +7,7 @@
 --   • All Sound instances are pre-created in SoundGroups for volume control
 --   • BGM crossfades: fade out current over 2s, fade in new over 2s
 --   • Night2 dynamic audio: heartbeat + static buzz scale with NGMI proximity
---   • Thunder SFX fires at random intervals during Night2
+--   • The Night2 storm (rain, rumble, thunder) is StormAmbience's
 --   • Public SFX functions are callable by other client scripts via BindableEvents
 --------------------------------------------------------------------------------
 
@@ -22,6 +22,8 @@ local CollectionService = game:GetService("CollectionService")
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local GameStateChanged = Remotes:WaitForChild("GameStateChanged") :: RemoteEvent
 local CorruptionStarted = Remotes:WaitForChild("CorruptionStarted") :: RemoteEvent
+local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
+local EndingTrigger = Remotes:WaitForChild("EndingTrigger") :: RemoteEvent
 
 local localPlayer = Players.LocalPlayer
 
@@ -55,6 +57,7 @@ local ASSET_IDS = {
 	SFX_PowerDown  = "rbxassetid://11984254",    -- Roblox CinematicBoom
 	SFX_StaticBuzz = "rbxassetid://12222019",    -- Roblox HalloweenLightning crackle
 	SFX_Click      = "rbxassetid://12221967",    -- Roblox button.wav
+	SFX_FlashlightClick = "rbxassetid://12221967", -- button.wav pitched per press; swap for a dedicated switch click
 	SFX_Achievement = "rbxassetid://12222253",   -- Roblox victory.wav
 	SFX_Breathing  = "rbxassetid://9125402735",  -- ProSoundEffects deep thumping (NGMI dread)
 }
@@ -89,8 +92,6 @@ local BREATHING_NEAR_DISTANCE = 26 -- studs; breathing starts fading in here
 local BREATHING_MAX_VOLUME = 1.0
 
 -- Night2 random SFX intervals
-local THUNDER_MIN_INTERVAL = 30
-local THUNDER_MAX_INTERVAL = 90
 local SCREAM_MIN_INTERVAL = 60
 local SCREAM_MAX_INTERVAL = 120
 
@@ -107,11 +108,13 @@ local sounds: { [string]: Sound } = {}
 
 -- Currently playing BGM track name (or nil)
 local currentBGMName: string? = nil
+-- The night transition cutscene is running (set on its trigger, cleared at NIGHT2).
+local nightIntroPlaying = false
 
 -- Night2 loop control flags
 local nightAudioActive: boolean = false
-local thunderLoopActive: boolean = false
 local screamLoopActive: boolean = false
+local screamLoopGen = 0
 local proximityConnection: RBXScriptConnection? = nil
 
 -- Corruption distortion state
@@ -160,6 +163,7 @@ local function createAllSounds()
 	createSound("SFX_Scream", ASSET_IDS.SFX_Scream, "SFX", false)
 	createSound("SFX_PowerDown", ASSET_IDS.SFX_PowerDown, "SFX", false)
 	createSound("SFX_Click", ASSET_IDS.SFX_Click, "SFX", false)
+	createSound("SFX_FlashlightClick", ASSET_IDS.SFX_FlashlightClick, "SFX", false)
 	createSound("SFX_Achievement", ASSET_IDS.SFX_Achievement, "SFX", false)
 	createSound("SFX_Footstep", ASSET_IDS.SFX_Footstep, "SFX", false)
 
@@ -234,7 +238,7 @@ end
 --------------------------------------------------------------------------------
 -- Night2 Dynamic Horror Audio
 -- Heartbeat + static buzz scale with nearest NGMI distance.
--- Thunder at random intervals. Distant screams every 60-120s.
+-- Distant screams every 60-120s (thunder is StormAmbience).
 --------------------------------------------------------------------------------
 
 local function getPlayerPosition(): Vector3?
@@ -249,6 +253,19 @@ local function getPlayerPosition(): Vector3?
 	return root.Position
 end
 
+-- Live mirror of GetTagged(TAG_NGMI), so the per-frame proximity check does
+-- not allocate a fresh array every frame.
+local ngmiSet: { [Instance]: true } = {}
+for _, entity in CollectionService:GetTagged(TAG_NGMI) do
+	ngmiSet[entity] = true
+end
+CollectionService:GetInstanceAddedSignal(TAG_NGMI):Connect(function(entity)
+	ngmiSet[entity] = true
+end)
+CollectionService:GetInstanceRemovedSignal(TAG_NGMI):Connect(function(entity)
+	ngmiSet[entity] = nil
+end)
+
 --- Find the nearest NGMI entity and return its distance, or nil if none found.
 local function getNearestNGMIDistance(): number?
 	local playerPos = getPlayerPosition()
@@ -257,9 +274,8 @@ local function getNearestNGMIDistance(): number?
 	end
 
 	local nearestDist: number? = nil
-	local ngmiEntities = CollectionService:GetTagged(TAG_NGMI)
 
-	for _, entity in ngmiEntities do
+	for entity in ngmiSet do
 		if entity:IsA("Model") then
 			local root = entity:FindFirstChild("HumanoidRootPart") :: BasePart?
 				or entity.PrimaryPart
@@ -303,7 +319,12 @@ local function startProximityAudio()
 		breathing:Play()
 	end
 
-	-- Update volumes every frame based on NGMI proximity
+	-- Update volumes every frame based on NGMI proximity. A second start (two
+	-- NIGHT2 signals inside the 1 s delay) would otherwise orphan the old
+	-- connection, which only ever wrote the same values.
+	if proximityConnection then
+		proximityConnection:Disconnect()
+	end
 	proximityConnection = RunService.Heartbeat:Connect(function(_dt: number)
 		if not nightAudioActive then
 			return
@@ -383,43 +404,22 @@ local function stopProximityAudio()
 	end
 end
 
---- Thunder SFX at random intervals during Night2.
-local function startThunderLoop()
-	thunderLoopActive = true
-
-	task.spawn(function()
-		while thunderLoopActive do
-			local interval = math.random() * (THUNDER_MAX_INTERVAL - THUNDER_MIN_INTERVAL) + THUNDER_MIN_INTERVAL
-			task.wait(interval)
-
-			if not thunderLoopActive then
-				break
-			end
-
-			local thunder = sounds["SFX_Thunder"]
-			if thunder then
-				-- Randomize volume for variety (distant vs close thunder)
-				thunder.Volume = 0.4 + math.random() * 0.6
-				thunder:Play()
-			end
-		end
-	end)
-end
-
-local function stopThunderLoop()
-	thunderLoopActive = false
-end
-
 --- Random distant scream SFX every 60-120 seconds during Night2.
 local function startScreamLoop()
+	if screamLoopActive then
+		return
+	end
 	screamLoopActive = true
+	-- A stop and restart inside one wait must not leave the old loop running.
+	screamLoopGen += 1
+	local gen = screamLoopGen
 
 	task.spawn(function()
-		while screamLoopActive do
+		while screamLoopActive and screamLoopGen == gen do
 			local interval = math.random() * (SCREAM_MAX_INTERVAL - SCREAM_MIN_INTERVAL) + SCREAM_MIN_INTERVAL
 			task.wait(interval)
 
-			if not screamLoopActive then
+			if not screamLoopActive or screamLoopGen ~= gen then
 				break
 			end
 
@@ -441,7 +441,6 @@ end
 local function startNightAudio()
 	nightAudioActive = true
 	startProximityAudio()
-	startThunderLoop()
 	startScreamLoop()
 end
 
@@ -449,7 +448,6 @@ end
 local function stopNightAudio()
 	nightAudioActive = false
 	stopProximityAudio()
-	stopThunderLoop()
 	stopScreamLoop()
 end
 
@@ -549,6 +547,18 @@ local function playClick()
 	end
 end
 
+-- Short tactile switch click. Pressing in sits a little higher than releasing,
+-- like the two halves of a real clicky tail switch.
+local function playFlashlightClick(isOn: boolean?)
+	local s = sounds["SFX_FlashlightClick"]
+	if s then
+		s.TimePosition = 0
+		s.Volume = 0.55 + math.random() * 0.1
+		s.PlaybackSpeed = (if isOn then 1.25 else 1.05) + (math.random() - 0.5) * 0.06
+		s:Play()
+	end
+end
+
 local function playFootstep()
 	local s = sounds["SFX_Footstep"]
 	if s then
@@ -582,8 +592,12 @@ local function onPhaseChanged(phase: number)
 		crossfadeBGM("BGM_Day2")
 
 	elseif phase == 3 then -- NIGHT2
-		-- Play power-down SFX for dramatic effect
-		playPowerDown()
+		-- Power-down boom, unless the night transition cutscene is still
+		-- playing: NIGHT2 starts mid-scene and the scene has its own strike.
+		if not nightIntroPlaying then
+			playPowerDown()
+		end
+		nightIntroPlaying = false
 
 		-- Short delay then start horror BGM
 		task.delay(1, function()
@@ -620,7 +634,7 @@ end
 --------------------------------------------------------------------------------
 
 local function createBindableAPI()
-	local function makeBindable(name: string, handler: () -> ())
+	local function makeBindable(name: string, handler: (...any) -> ())
 		local event = Instance.new("BindableEvent")
 		event.Name = name
 		event.Parent = script
@@ -633,6 +647,7 @@ local function createBindableAPI()
 	makeBindable("PlayAchievement", playAchievement)
 	makeBindable("PlayClick", playClick)
 	makeBindable("PlayFootstep", playFootstep)
+	makeBindable("PlayFlashlightClick", playFlashlightClick)
 end
 
 --------------------------------------------------------------------------------
@@ -659,6 +674,23 @@ end)
 
 CorruptionStarted.OnClientEvent:Connect(function()
 	onCorruptionStarted()
+end)
+
+-- The music follows the story, not just the phase. The night transition
+-- cutscene starts while DAY2's cheerful track is still up, so the horror
+-- track takes over the moment it begins; and the bad ending trades DAY3's
+-- triumphant track for the horror one.
+CutsceneTrigger.OnClientEvent:Connect(function(data: any)
+	if type(data) == "table" and data.cutscene == "nightTransition" then
+		nightIntroPlaying = true
+		removeCorruptionDistortion()
+		crossfadeBGM("BGM_Night2")
+	end
+end)
+EndingTrigger.OnClientEvent:Connect(function(data: any)
+	if type(data) == "table" and data.ending == "bad" then
+		crossfadeBGM("BGM_Night2")
+	end
 end)
 
 -- Also listen for spray remote to auto-play spray SFX

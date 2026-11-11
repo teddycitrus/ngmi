@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local Builder = require(script.Parent.Venue.Builder)
+local AssetLibrary = require(script.Parent.AssetLibrary)
 
 for _, name in { "Baseplate", "SpawnLocation" } do
 	local existing = workspace:FindFirstChild(name)
@@ -22,6 +23,26 @@ for _, name in { "Baseplate", "SpawnLocation" } do
 end
 
 local t0 = os.clock()
+
+-- Furniture the client-side night transition cutscene dresses its lounge with.
+AssetLibrary.publish({
+	"Couch",
+	"Armchair",
+	"CoffeeTable",
+	"BistroTable",
+	"BeanBag",
+	"Plant",
+	"PlantTall",
+	"Vending",
+	"WaterCooler",
+	"Fridge",
+	"FloorLamp",
+	"Laptop",
+	"TV",
+	"Bookshelf",
+	"TrashBin",
+	"NoticeBoard",
+}, "CutsceneProps")
 
 -- HAND-EDIT THE WHOLE VENUE: save a finished map model as assets/Venue.rbxmx
 -- (Rojo syncs it to ReplicatedStorage.Assets.Venue) and it is used verbatim

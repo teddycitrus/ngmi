@@ -384,8 +384,12 @@ task.spawn(function()
 end)
 
 -- Coding progress drives the coding objectives (and the gated final task).
-CodingProgress.OnClientEvent:Connect(function(data: { completion: number, blocked: boolean? })
-	local pct = math.floor(data.completion or 0)
+CodingProgress.OnClientEvent:Connect(function(data: { completion: number?, blocked: boolean? })
+	-- Desk start/stop signals share this remote and carry no completion.
+	if type(data) ~= "table" or type(data.completion) ~= "number" then
+		return
+	end
+	local pct = math.floor(data.completion)
 
 	local w1 = findObjective("code_wave1")
 	if w1 then

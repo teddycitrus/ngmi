@@ -5,26 +5,11 @@
 -- RigFactory.articulate, resetArticulation and rampArticulation).
 --------------------------------------------------------------------------------
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RigPose = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("RigPose"))
+
 local Articulation = {}
-
---------------------------------------------------------------------------------
--- Joint helpers
---------------------------------------------------------------------------------
-
--- R15 parents each Motor6D under the CHILD part it drives, so the elbow motor
--- lives in RightLowerArm, not RightUpperArm. Modern rigs may also carry an
--- AnimationConstraint sharing the joint's name, so match the class explicitly.
-local function motorIn(model: Model, partName: string, motorName: string): Motor6D?
-	local part = model:FindFirstChild(partName)
-	if not part then
-		return nil
-	end
-	local motor = part:FindFirstChild(motorName)
-	if motor and motor:IsA("Motor6D") then
-		return motor :: Motor6D
-	end
-	return nil
-end
 
 --------------------------------------------------------------------------------
 -- Corruption articulation
@@ -32,65 +17,42 @@ end
 -- The mutation pose, driven by one 0..1 dial so it can be ramped over the
 -- corruption window or snapped to a value for a cutscene frame.
 --
--- This is Motor6D articulation, NOT skinned-mesh deformation: rigs built by
+-- This is joint articulation, NOT skinned-mesh deformation: rigs built by
 -- CreateHumanoidModelFromDescription are jointed MeshParts with no bones, so
--- there is nothing to deform. Real deformation would need a skinned rig with a
--- bone hierarchy authored in Blender and uploaded. Articulating the elbows,
--- shoulders and neck is what actually sells the NGMI silhouette here.
+-- there is nothing to deform. Articulating the elbows, shoulders and neck is
+-- what actually sells the NGMI silhouette here. Those rigs have no Motor6Ds
+-- (AnimationConstraints instead), so the pose goes through Shared.RigPose,
+-- which drives either kind of joint and layers under the playing animation.
 --------------------------------------------------------------------------------
 
-local ARTICULATION_JOINTS = {
-	{ part = "RightLowerArm", motor = "RightElbow" },
-	{ part = "LeftLowerArm", motor = "LeftElbow" },
-	{ part = "RightUpperArm", motor = "RightShoulder" },
-	{ part = "LeftUpperArm", motor = "LeftShoulder" },
-	{ part = "Head", motor = "Neck" },
-	{ part = "UpperTorso", motor = "Waist" },
+-- Full mutation in RigPose conventions: elbows crank up and inward, shoulders
+-- roll forward, the neck cocks and the waist hunches.
+local MUTATION: RigPose.Pose = {
+	rE = Vector3.new(-75, 0, -20),
+	lE = Vector3.new(-75, 0, 20),
+	rS = Vector3.new(25, 0, 18),
+	lS = Vector3.new(25, 0, -18),
+	neck = Vector3.new(22, 0, 12),
+	waist = Vector3.new(18, 0, 0),
 }
 
--- Base C0s, captured the first time a rig is articulated so the pose can be
--- rolled back exactly. Weak keys: an entry disappears when its rig is collected.
-local baseC0: { [Model]: { [string]: CFrame } } = setmetatable({}, { __mode = "k" }) :: any
+-- Posers, created the first time a rig is articulated so its neutral joints
+-- are captured as the base. Weak keys: an entry disappears with its rig.
+local posers: { [Model]: RigPose.Rig } = setmetatable({}, { __mode = "k" }) :: any
 
---- Pose a rig along the human → NGMI axis. `amount` is 0 (untouched) to 1 (full
---- mutation): elbows crank up and inward, shoulders roll forward, the neck cocks
---- and the waist hunches.
+--- Pose a rig along the human -> NGMI axis. `amount` is 0 (untouched) to 1
+--- (full mutation).
 function Articulation.articulate(model: Model, amount: number)
 	local t = math.clamp(amount, 0, 1)
-
-	local cached = baseC0[model]
-	if not cached then
-		cached = {}
-		baseC0[model] = cached
-	end
-
-	for _, joint in ARTICULATION_JOINTS do
-		local motor = motorIn(model, joint.part, joint.motor)
-		if motor then
-			local base = cached[joint.motor]
-			if not base then
-				base = motor.C0
-				cached[joint.motor] = base
-			end
-
-			local offset: CFrame
-			if joint.motor == "RightElbow" then
-				offset = CFrame.Angles(math.rad(-75 * t), 0, math.rad(-20 * t))
-			elseif joint.motor == "LeftElbow" then
-				offset = CFrame.Angles(math.rad(-75 * t), 0, math.rad(20 * t))
-			elseif joint.motor == "RightShoulder" then
-				offset = CFrame.Angles(math.rad(25 * t), 0, math.rad(18 * t))
-			elseif joint.motor == "LeftShoulder" then
-				offset = CFrame.Angles(math.rad(25 * t), 0, math.rad(-18 * t))
-			elseif joint.motor == "Neck" then
-				offset = CFrame.Angles(math.rad(22 * t), 0, math.rad(12 * t))
-			else -- Waist
-				offset = CFrame.Angles(math.rad(18 * t), 0, 0)
-			end
-
-			motor.C0 = base * offset
+	local rig = posers[model]
+	if not rig then
+		if t == 0 then
+			return -- never posed, already neutral
 		end
+		rig = RigPose.new(model)
+		posers[model] = rig
 	end
+	rig:apply(RigPose.scale(MUTATION, t))
 end
 
 --- Restore a rig to its captured neutral pose.

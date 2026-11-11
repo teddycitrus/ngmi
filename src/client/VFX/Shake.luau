@@ -52,6 +52,11 @@ local function update(deltaTime: number)
 	end
 
 	noiseTime += deltaTime * SHAKE_FREQUENCY
+	-- A cutscene's camera holds still between cuts, so a relative multiply
+	-- would pile up frame after frame and drift the shot off its subject.
+	if camera.CameraType == Enum.CameraType.Scriptable then
+		return
+	end
 
 	-- Quadratic falloff: gentle knocks stay gentle, jumpscares hit hard.
 	local magnitude = trauma * trauma

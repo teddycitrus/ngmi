@@ -54,10 +54,25 @@ local timingRing: Frame? = nil
 local missIndicator: TextLabel? = nil
 local safeLabel: TextLabel? = nil
 local updateConnection: RBXScriptConnection? = nil
+-- Bumped per start, so delayed closes from an earlier run leave a new one alone.
+local sessionId = 0
 
 -- ============================================================
 -- NEAREST NGMI DISTANCE
 -- ============================================================
+-- Tag membership kept in sync by signal, so the per-frame scan below does not
+-- allocate a fresh GetTagged array every Heartbeat.
+local taggedNGMIs: { [Instance]: true } = {}
+for _, ngmi in CollectionService:GetTagged("NGMI") do
+    taggedNGMIs[ngmi] = true
+end
+CollectionService:GetInstanceAddedSignal("NGMI"):Connect(function(ngmi: Instance)
+    taggedNGMIs[ngmi] = true
+end)
+CollectionService:GetInstanceRemovedSignal("NGMI"):Connect(function(ngmi: Instance)
+    taggedNGMIs[ngmi] = nil
+end)
+
 local function getNearestNGMIDistance(): number
     local character = player.Character
     if not character then return math.huge end
@@ -67,7 +82,7 @@ local function getNearestNGMIDistance(): number
     local playerPos = rootPart.Position
     local nearest = math.huge
 
-    for _, ngmi in CollectionService:GetTagged("NGMI") do
+    for ngmi in taggedNGMIs do
         if ngmi:IsA("Model") then
             local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
             if ngmiRoot and ngmiRoot:IsA("BasePart") then
@@ -368,8 +383,11 @@ function playerDiscovered()
     HidingStateChanged:FireServer({ hiding = false, discovered = true })
 
     -- Close after delay
+    local session = sessionId
     task.delay(1.5, function()
-        stopMinigame()
+        if sessionId == session then
+            stopMinigame()
+        end
     end)
 end
 
@@ -380,13 +398,16 @@ local function startMinigame()
     if isActive then return end
     isActive = true
     missCount = 0
+    sessionId += 1
+    local session = sessionId
 
     createMinigameUI()
 
     local beatAccum = 0
+    local exiting = false
 
     updateConnection = RunService.Heartbeat:Connect(function(dt: number)
-        if not isActive then return end
+        if not isActive or exiting then return end
 
         -- Update BPM based on NGMI distance
         local dist = getNearestNGMIDistance()
@@ -396,6 +417,7 @@ local function startMinigame()
         -- Check if NGMIs left
         if dist > SAFE_DISTANCE then
             -- Safe!
+            exiting = true
             if safeLabel then
                 safeLabel.Text = "Safe..."
                 TweenService:Create(safeLabel, TweenInfo.new(0.5), {
@@ -404,7 +426,7 @@ local function startMinigame()
             end
 
             task.delay(1.5, function()
-                if isActive then
+                if isActive and sessionId == session then
                     HidingStateChanged:FireServer({ hiding = false, discovered = false })
                     stopMinigame()
                 end
@@ -430,9 +452,10 @@ function stopMinigame()
         updateConnection = nil
     end
 
-    if minigameGui then
+    local gui = minigameGui
+    if gui then
         -- Fade out
-        for _, child in minigameGui:GetChildren() do
+        for _, child in gui:GetChildren() do
             if child:IsA("Frame") then
                 TweenService:Create(child, TweenInfo.new(0.5), {
                     BackgroundTransparency = 1,
@@ -445,8 +468,8 @@ function stopMinigame()
         end
 
         task.delay(0.6, function()
-            if minigameGui then
-                minigameGui:Destroy()
+            gui:Destroy()
+            if minigameGui == gui then
                 minigameGui = nil
             end
         end)

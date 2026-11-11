@@ -164,6 +164,10 @@ fogParams.IgnoreWater = true
 
 local floorY = 0
 local lastProbe = 0
+local fogOn = false
+local lastCamPos: Vector3? = nil
+-- false until the filter is first built; then the character it was built for
+local filterChar: Model | false | nil = false
 
 --------------------------------------------------------------------------------
 -- Phase application
@@ -172,7 +176,7 @@ local lastProbe = 0
 local function applyPhase()
 	dust.Rate = if corruption then DUST_RATE_CORRUPTION else (DUST_RATE[currentPhase] or 0)
 
-	local fogOn = corruption or currentPhase == PHASE_NIGHT2
+	fogOn = corruption or currentPhase == PHASE_NIGHT2
 	fog.Rate = if fogOn then FOG_RATE else 0
 	fog.Color = ColorSequence.new(if corruption then Color3.fromRGB(70, 86, 78) else Color3.fromRGB(42, 48, 62))
 end
@@ -183,14 +187,20 @@ end
 
 RunService.Heartbeat:Connect(function()
 	local camPos = camera.CFrame.Position
-	dustPart.CFrame = CFrame.new(camPos)
+	if camPos ~= lastCamPos then
+		lastCamPos = camPos
+		dustPart.CFrame = CFrame.new(camPos)
+	end
 
-	if fog.Rate > 0 then
+	if fogOn then
 		local now = os.clock()
 		if now - lastProbe > FOG_FLOOR_PROBE then
 			lastProbe = now
 			local character = Players.LocalPlayer.Character
-			fogParams.FilterDescendantsInstances = if character then { character, dustPart, fogPart } else { dustPart, fogPart }
+			if character ~= filterChar then
+				filterChar = character
+				fogParams.FilterDescendantsInstances = if character then { character, dustPart, fogPart } else { dustPart, fogPart }
+			end
 			local hit = workspace:Raycast(camPos, Vector3.new(0, -20, 0), fogParams)
 			if hit then
 				floorY = hit.Position.Y

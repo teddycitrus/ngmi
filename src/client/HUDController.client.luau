@@ -43,6 +43,13 @@ local PHASE_NAMES = {
     [4] = { text = "DAY 3  JUDGEMENT DAY", color = UITheme.Color.Text },
 }
 
+local DAY_NAMES = {
+    [1] = "FRIDAY",
+    [2] = "SATURDAY",
+    [3] = "SATURDAY NIGHT",
+    [4] = "SUNDAY",
+}
+
 -- ============================================================
 -- STATE
 -- ============================================================
@@ -214,7 +221,7 @@ GameStateChanged.OnClientEvent:Connect(function(data: { phase: number })
     showPhaseBanner(currentPhase)
 end)
 
-PhaseTimerSync.OnClientEvent:Connect(function(data: { phase: number, timeRemaining: number, gameClockTime: number })
+PhaseTimerSync.OnClientEvent:Connect(function(data: { currentPhase: number, timeRemaining: number, gameClockTime: number })
     -- Update clock display
     local clockTime = data.gameClockTime
     local hours = math.floor(clockTime)
@@ -229,16 +236,10 @@ PhaseTimerSync.OnClientEvent:Connect(function(data: { phase: number, timeRemaini
     timeLabel.Text = string.format("%d:%02d %s", displayHour, minutes, ampm)
 
     -- Update day label
-    local dayNames = {
-        [1] = "FRIDAY",
-        [2] = "SATURDAY",
-        [3] = "SATURDAY NIGHT",
-        [4] = "SUNDAY",
-    }
-    dayLabel.Text = dayNames[data.phase] or ""
+    dayLabel.Text = DAY_NAMES[data.currentPhase] or ""
 
     -- Night mode clock color
-    if data.phase == 3 then
+    if data.currentPhase == 3 then
         timeLabel.TextColor3 = UITheme.Color.Danger
         dayLabel.TextColor3 = UITheme.Color.Danger
     else

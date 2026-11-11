@@ -12,6 +12,7 @@ local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UITheme = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("UITheme"))
+local NGMIMutation = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("NGMIMutation"))
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local NGMIStunned = Remotes:WaitForChild("NGMIStunned") :: RemoteEvent
@@ -35,6 +36,7 @@ local camera = workspace.CurrentCamera
 local isNight2 = false
 local isDead = false
 local nearestNGMIDistance = math.huge
+local publishedDistance: number? = nil -- last NGMIDistance attribute written
 local proximityConnection: RBXScriptConnection? = nil
 local jumpScareChance = 0
 local lastJumpScareTime = 0
@@ -54,14 +56,21 @@ end
 -- Vignette overlay (dark edges)
 local vignetteGui: ScreenGui? = nil
 local vignetteImage: ImageLabel? = nil
+-- The edge frames (vignetteImage's only Frame children) and the intensity
+-- they last showed. Nothing else writes them, so unchanged writes are skipped.
+local vignetteEdges: { Frame } = {}
+local vignetteShown: number? = nil
 
 local function createVignetteOverlay()
     if vignetteGui then return end
+    table.clear(vignetteEdges)
+    vignetteShown = nil
 
     vignetteGui = Instance.new("ScreenGui")
     vignetteGui.Name = "NGMIVignette"
     vignetteGui.DisplayOrder = 50
     vignetteGui.IgnoreGuiInset = true
+    vignetteGui.ResetOnSpawn = false
     vignetteGui.Parent = playerGui
 
     vignetteImage = Instance.new("ImageLabel")
@@ -83,6 +92,7 @@ local function createVignetteOverlay()
         edge.BackgroundTransparency = 0.3
         edge.BorderSizePixel = 0
         edge.Parent = vignetteImage
+        table.insert(vignetteEdges, edge)
 
         local gradient = Instance.new("UIGradient")
         if gradDir == "left" then
@@ -110,18 +120,16 @@ end
 
 local function setVignetteIntensity(intensity: number)
     if not vignetteImage then return end
-    for _, child in vignetteImage:GetChildren() do
-        if child:IsA("Frame") then
-            child.BackgroundTransparency = 1 - (intensity * 0.7)
-        end
+    if intensity == vignetteShown then return end
+    vignetteShown = intensity
+    for _, edge in vignetteEdges do
+        edge.BackgroundTransparency = 1 - (intensity * 0.7)
     end
 end
 
 -- ============================================================
 -- JUMP SCARE SYSTEM
 -- ============================================================
-local jumpScareGui: ScreenGui? = nil
-
 -- VFXManager publishes its effect API as BindableEvents parented to its own
 -- script (a LocalScript can't be require()d). Resolved lazily and cached so load
 -- order between the two scripts doesn't matter, and so a missing VFXManager
@@ -160,40 +168,8 @@ local function triggerJumpScare()
         end
     end
 
-    if jumpScareGui then jumpScareGui:Destroy() end
-
-    jumpScareGui = Instance.new("ScreenGui")
-    jumpScareGui.Name = "JumpScare"
-    jumpScareGui.DisplayOrder = 200
-    jumpScareGui.IgnoreGuiInset = true
-    jumpScareGui.Parent = playerGui
-
-    -- Distorted face using text
-    local face = Instance.new("TextLabel")
-    face.Size = UDim2.new(0.6, 0, 0.6, 0)
-    face.Position = UDim2.new(0.2, 0, 0.2, 0)
-    face.BackgroundTransparency = 1 -- no ugly box around the eye
-    face.TextColor3 = Color3.fromRGB(255, 0, 0)
-    face.FontFace = UITheme.Font.Bold
-    face.TextSize = 180
-    face.Text = "👁️"
-    face.TextTransparency = 0
-    face.Parent = jumpScareGui
-
-    -- Static overlay
-    local static = Instance.new("Frame")
-    static.Size = UDim2.new(1, 0, 1, 0)
-    static.BackgroundColor3 = Color3.new(1, 1, 1)
-    static.BackgroundTransparency = 0.85
-    static.Parent = jumpScareGui
-
-    -- Remove after 0.15s
-    task.delay(0.15, function()
-        if jumpScareGui then
-            jumpScareGui:Destroy()
-            jumpScareGui = nil
-        end
-    end)
+    -- No on-screen overlay: the camera jolt is the scare. (This used to flash
+    -- an eye emoji and a white frame over the screen.)
 end
 
 -- ============================================================
@@ -207,7 +183,7 @@ local function setupNGMIVisuals(ngmi: Model)
     -- Flickering PointLight in eyes
     local eyeLight = Instance.new("PointLight")
     eyeLight.Name = "EyeGlow"
-    eyeLight.Color = Color3.fromRGB(255, 0, 0)
+    eyeLight.Color = NGMIMutation.styleOf(ngmi).eye
     eyeLight.Brightness = 3
     eyeLight.Range = 8
     eyeLight.Parent = head
@@ -218,8 +194,8 @@ local function setupNGMIVisuals(ngmi: Model)
         local emitter = Instance.new("ParticleEmitter")
         emitter.Name = "CorruptionTrail"
         emitter.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(80, 20, 120)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(20, 0, 30)),
+            ColorSequenceKeypoint.new(0, NGMIMutation.styleOf(ngmi).smoke[1]),
+            ColorSequenceKeypoint.new(1, NGMIMutation.styleOf(ngmi).smoke[2]),
         })
         emitter.Size = NumberSequence.new({
             NumberSequenceKeypoint.new(0, 0.3),
@@ -251,16 +227,26 @@ local function setupNGMIVisuals(ngmi: Model)
     end)
 end
 
+-- Same membership as GetTagged("NGMI") (Models only), kept by the tag signals
+-- so the proximity loop doesn't rebuild the tagged list every frame.
+local ngmiModels: { [Model]: true } = {}
+
 -- Watch for new NGMIs
 CollectionService:GetInstanceAddedSignal("NGMI"):Connect(function(instance)
     if instance:IsA("Model") then
+        ngmiModels[instance] = true
         setupNGMIVisuals(instance)
     end
+end)
+
+CollectionService:GetInstanceRemovedSignal("NGMI"):Connect(function(instance)
+    ngmiModels[instance :: Model] = nil
 end)
 
 -- Setup existing NGMIs
 for _, ngmi in CollectionService:GetTagged("NGMI") do
     if ngmi:IsA("Model") then
+        ngmiModels[ngmi] = true
         setupNGMIVisuals(ngmi)
     end
 end
@@ -278,6 +264,9 @@ local function startProximityTracking()
     blurEffect = getOrCreateEffect("BlurEffect", "NGMIProximityBlur") :: BlurEffect
     blurEffect.Size = 0
 
+    if proximityConnection then
+        proximityConnection:Disconnect()
+    end
     proximityConnection = RunService.Heartbeat:Connect(function()
         if not isNight2 or isDead then return end
 
@@ -289,14 +278,12 @@ local function startProximityTracking()
         local playerPos = rootPart.Position
         nearestNGMIDistance = math.huge
 
-        for _, ngmi in CollectionService:GetTagged("NGMI") do
-            if ngmi:IsA("Model") then
-                local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
-                if ngmiRoot and ngmiRoot:IsA("BasePart") then
-                    local dist = (ngmiRoot.Position - playerPos).Magnitude
-                    if dist < nearestNGMIDistance then
-                        nearestNGMIDistance = dist
-                    end
+        for ngmi in ngmiModels do
+            local ngmiRoot = ngmi:FindFirstChild("HumanoidRootPart") or ngmi.PrimaryPart
+            if ngmiRoot and ngmiRoot:IsA("BasePart") then
+                local dist = (ngmiRoot.Position - playerPos).Magnitude
+                if dist < nearestNGMIDistance then
+                    nearestNGMIDistance = dist
                 end
             end
         end
@@ -308,7 +295,11 @@ local function startProximityTracking()
         -- than running a second CollectionService scan over every NGMI each frame.
         -- Capped rather than math.huge: an infinite attribute value is asking for
         -- trouble at the replication boundary, and "very far" is all readers need.
-        player:SetAttribute("NGMIDistance", math.min(dist, 9999))
+        local published = math.min(dist, 9999)
+        if published ~= publishedDistance then
+            publishedDistance = published
+            player:SetAttribute("NGMIDistance", published)
+        end
 
         if dist < 50 then
             -- Vignette (50-0 studs)
@@ -341,13 +332,16 @@ local function startProximityTracking()
                     blurEffect.Size = blurIntensity * 12
                 end
 
-                -- Camera micro-shake
-                local shakeIntensity = math.clamp((15 - dist) / 15, 0, 1) * 0.3
-                camera.CFrame = camera.CFrame * CFrame.Angles(
-                    math.rad(math.random() * shakeIntensity * 2 - shakeIntensity),
-                    math.rad(math.random() * shakeIntensity * 2 - shakeIntensity),
-                    0
-                )
+                -- Camera micro-shake, never on a cutscene's camera: the night
+                -- transition is still filming when the NGMIs spawn near the player
+                if camera.CameraType ~= Enum.CameraType.Scriptable then
+                    local shakeIntensity = math.clamp((15 - dist) / 15, 0, 1) * 0.3
+                    camera.CFrame = camera.CFrame * CFrame.Angles(
+                        math.rad(math.random() * shakeIntensity * 2 - shakeIntensity),
+                        math.rad(math.random() * shakeIntensity * 2 - shakeIntensity),
+                        0
+                    )
+                end
             end
 
             -- Jump scare risk (8-0 studs, 10% chance per second)
