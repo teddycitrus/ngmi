@@ -13,14 +13,15 @@
 -- owns their lifecycle, so the two scripts don't fight.
 --------------------------------------------------------------------------------
 
-local Players           = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local ServerStorage     = game:GetService("ServerStorage")
+local ServerStorage = game:GetService("ServerStorage")
 local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
 
 local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
 local RigFactory = require(script.Parent.RigFactory)
+local NPCSteer = require(script.Parent.NPCSteer)
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local CutsceneTrigger = Remotes:WaitForChild("CutsceneTrigger") :: RemoteEvent
@@ -137,21 +138,6 @@ local function stopAnimTracks(humanoid: Humanoid)
 			t:Stop()
 		end
 	end
-end
-
---- Walk a humanoid toward a point, giving up after `timeout` seconds so a stuck
---- NPC never stalls the whole dispersal.
-local function walkTo(humanoid: Humanoid, pos: Vector3, timeout: number)
-	humanoid:MoveTo(pos)
-	local reached = false
-	local conn = humanoid.MoveToFinished:Connect(function()
-		reached = true
-	end)
-	local t0 = os.clock()
-	while not reached and os.clock() - t0 < timeout do
-		task.wait(0.15)
-	end
-	conn:Disconnect()
 end
 
 --- Collect the auditorium bench Seats, sorted front (near the stage) → back.
@@ -360,53 +346,71 @@ local function runOpening()
 	task.wait(GO_LEAD + INTRO_SECONDS + talkSeconds + 2.8)
 
 	-- Each NPC stands, walks up the centre aisle to the north doorway, steps into
-	-- the corridor and rounds the corner — then (now out of sight) is relocated to
+	-- the corridor and rounds the corner, then (now out of sight) is relocated to
 	-- their home floor. Paths are hardcoded to the auditorium's north exit.
-	for i, id in ALL_IDS do
+	-- They file out one at a time, nearest the door first (back row, then
+	-- forward, organizer last), each in the aisle lane on their own side and
+	-- off to their own spot down the corridor, so no two share a target.
+	local order: { string } = {}
+	for i = #SEATED_IDS, 1, -1 do
+		table.insert(order, SEATED_IDS[i])
+	end
+	table.insert(order, "npc_organizer_sarah")
+	local perSide = { [-1] = 0, [1] = 0 }
+	for k, id in order do
 		local m = getNPC(id)
 		if not m then
 			continue
 		end
 		local h = m:FindFirstChildOfClass("Humanoid")
 		local r = m:FindFirstChild("HumanoidRootPart")
-		if r and r:IsA("BasePart") then
-			r.Anchored = false
+		if not (h and r and r:IsA("BasePart")) then
+			continue
 		end
-		setPromptEnabled(m, true)
-		if h and r and r:IsA("BasePart") then
+		-- the side of the aisle they sit on; the organizer takes whichever
+		-- side has had fewer
+		local side = if r.Position.X < CX - 1
+			then -1
+			elseif r.Position.X > CX + 1 then 1
+			elseif perSide[-1] <= perSide[1] then -1
+			else 1
+		perSide[side] += 1
+		local laneX = CX + side * 2.5
+		local cornerX = CX + side * (12 + perSide[side] * 4)
+		task.delay((k - 1) * 0.9, function()
+			if not m.Parent then
+				return
+			end
+			r.Anchored = false
+			setPromptEnabled(m, true)
 			RigFactory.unsit(h)
 			h.Sit = false
 			h.Jump = true -- pops them up out of the bench Seat weld
-			local side = (i % 2 == 0) and 1 or -1 -- alternate which way they round the corner
-			task.spawn(function()
-				-- into the centre aisle at their current row…
-				walkTo(h, Vector3.new(CX, FLOOR_Y, math.min(r.Position.Z, AUD.maxZ - 8)), 3)
-				-- …up to the north doorway…
-				walkTo(h, Vector3.new(CX, FLOOR_Y, AUD.maxZ - 3), 4)
-				-- …step through into the corridor…
-				walkTo(h, Vector3.new(CX, FLOOR_Y, AUD.maxZ + 4), 3)
-				-- …and turn the corner.
-				walkTo(h, Vector3.new(CX + side * 16, FLOOR_Y, AUD.maxZ + 8), 3)
-				-- gone from view — send them home to their own floor.
-				local marker = homeMarkerFor(id)
-				if marker and m.Parent then
-					m:PivotTo(marker.CFrame + Vector3.new(0, 3, 0))
-					local hh = m:FindFirstChildOfClass("Humanoid")
-					if hh then
-						hh.Sit = false
-					end
-				end
-				-- Hand them back to NPCManager: idle-wander can take over now.
-				if m.Parent then
-					m:SetAttribute("CutsceneControlled", false)
-				end
-			end)
-		end
+			-- into their aisle lane at their current row
+			NPCSteer.walkTo(h, r, Vector3.new(laneX, FLOOR_Y, math.min(r.Position.Z, AUD.maxZ - 8)), 3)
+			-- up to the north doorway
+			NPCSteer.walkTo(h, r, Vector3.new(laneX, FLOOR_Y, AUD.maxZ - 3), 5)
+			-- step through into the corridor
+			NPCSteer.walkTo(h, r, Vector3.new(laneX, FLOOR_Y, AUD.maxZ + 4), 3)
+			-- and turn the corner to their own spot
+			NPCSteer.walkTo(h, r, Vector3.new(cornerX, FLOOR_Y, AUD.maxZ + 8), 4)
+			-- gone from view, send them home to their own floor
+			local marker = homeMarkerFor(id)
+			if marker and m.Parent then
+				m:PivotTo(marker.CFrame + Vector3.new(0, 3, 0))
+				h.Sit = false
+			end
+			-- Hand them back to NPCManager: idle-wander can take over now.
+			if m.Parent then
+				m:SetAttribute("CutsceneControlled", false)
+			end
+		end)
 	end
 
 	-- Once everyone has cleared out, re-enable the pews so players can sit on them.
 	-- (The anti-drift watchdog below still snaps any stray bench home as a backup.)
-	task.delay(13, function()
+	-- The last NPC leaves ~6 s after the first, so allow for the stagger.
+	task.delay(20, function()
 		forEachMapBench(function(bench)
 			bench.Disabled = false
 		end)
