@@ -102,11 +102,36 @@ local function standingHeight(model: Model): number
 	return head.Position.Y + head.Size.Y / 2 - low
 end
 
-local function getTemplate(look: Looks.Look): Model?
+local BLOCKY_MAX = 5.9 -- unscaled height under which a body didn't load
+
+local getTemplate: (look: Looks.Look) -> Model?
+
+-- The look's outfit on the first stand-in body that builds (Looks.substitute),
+-- cached under the look's own key. A stand-in never chains to another.
+local function useStandIn(look: Looks.Look): Model?
+	local t: Model? = nil
+	if not look.key:find("_sub%d+$") then
+		warn("[RigFactory] look " .. look.key .. " body failed to load, using a stand-in")
+		local n = 1
+		local sub = Looks.substitute(look, n)
+		while sub and not t do
+			t = getTemplate(sub)
+			n += 1
+			sub = if t then nil else Looks.substitute(look, n)
+		end
+	end
+	templates[look.key] = t or false
+	return t
+end
+
+function getTemplate(look: Looks.Look): Model?
 	local t = templates[look.key]
 	if t == nil then
 		local built = buildTemplate(Looks.describe(look), look.key)
-		if built then
+		if not built then
+			return useStandIn(look)
+		end
+		do
 			-- Joints only settle once the rig is in the workspace: measured
 			-- unparented, the height read 10-15% high. Park it out of sight,
 			-- pinned, for a frame.
@@ -118,6 +143,13 @@ local function getTemplate(look: Looks.Look): Model?
 			built:PivotTo(CFrame.new(0, 5000, 0))
 			built.Parent = workspace
 			task.wait()
+			-- A bundle body that fails to load (taken off sale, moderated)
+			-- leaves Roblox's default blocky R15 parts, ~5.2 studs against the
+			-- shop bodies' 6.3 to 7.5.
+			if standingHeight(built) < BLOCKY_MAX then
+				built:Destroy()
+				return useStandIn(look)
+			end
 			local want = TARGET_HEIGHT * (look.height or 1)
 			for _ = 1, 2 do
 				local h = standingHeight(built)

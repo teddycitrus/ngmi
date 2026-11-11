@@ -31,7 +31,9 @@ local PERSON: { [string]: Person } = {
 	luke = { parts = { 137818495202071, 94670898413446, 121780194799365, 116349841260868, 71235686557283 }, head = 108356625707649, skin = Color3.fromRGB(232, 196, 170) },
 	-- January Model Man (bundle 272889456128840)
 	mateo = { parts = { 106062650582720, 93273068870672, 123504742874685, 109637020907933, 108488675090572 }, head = 126811571812177, skin = Color3.fromRGB(188, 138, 102) },
-	-- Realistic Model Woman Doll (bundle 64276026698783)
+	-- Realistic Model Woman Doll (bundle 64276026698783). Its parts started
+	-- failing with "Asset is not approved for the requester" on 2026-11-11,
+	-- so nothing uses it; kept for if it comes back.
 	emma = { parts = { 74203867041109, 89294577189357, 85761870061455, 72013766986908, 139331641629327 }, head = 139734314809040, skin = Color3.fromRGB(236, 202, 182) },
 	-- Woman Fashion Model Doll (bundle 181282816119101)
 	mei = { parts = { 122831550366162, 106832235837446, 95246976223366, 124333485905753, 86653892031792 }, head = 76846031172896, skin = Color3.fromRGB(238, 206, 186) },
@@ -159,7 +161,7 @@ end
 -- adult build, so the things hunting you have the venue's proportions, not
 -- the default blocky R15 the empty description gives.
 Looks.BARE = {} :: { Look }
-for _, name in { "deshawn", "kenji", "luke", "mateo", "emma", "mei", "sofia", "nia", "claire" } do
+for _, name in { "deshawn", "kenji", "luke", "mateo", "mei", "sofia", "nia", "claire" } do
 	local person = PERSON[name]
 	if person then
 		table.insert(Looks.BARE, { key = "bare_" .. name, person = person, hair = {}, clothes = {}, shoes = {} } :: any)
@@ -178,7 +180,7 @@ Looks.CROWD = {
 -- The named NPCs: each one a colour and cut nobody in the crowd wears.
 Looks.NAMED = {
 	-- salmon blazer on stage, readable from the back row
-	npc_organizer_sarah = look("sarah", PERSON.emma, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack, { height = 0.95 }),
+	npc_organizer_sarah = look("sarah", PERSON.claire, HAIR.blonde, { TOP.stripeTeeWhite, TOP.coatSalmon, BOTTOM.formalBlack }, SHOES.flatsBlack, { height = 0.95 }),
 	-- red ruffle skirt under a pinstripe coat
 	npc_judge_priya = look("priya", PERSON.mei, HAIR.salonBun, { TOP.tieTopWhite, TOP.coatStripe, BOTTOM.ruffleRed }, SHOES.dressBlack, { face = { GLASSES }, height = 0.95 }),
 	-- white leather jacket, the sponsor money look
@@ -194,6 +196,42 @@ Looks.NAMED = {
 	-- all black, the guard
 	npc_security_ron = look("ron", PERSON.mateo, HAIR.buzz, { TOP.knitBlack, BOTTOM.formalBlack }, SHOES.milBlack, { height = 1.04, width = 1.08 }),
 } :: { [string]: Look }
+
+-- Bodies that can stand in for one another when a bundle stops loading.
+local SUBSTITUTES = {
+	{ "claire", "sofia", "mei", "nia" },
+	{ "kenji", "luke", "mateo", "deshawn" },
+}
+
+--- The same outfit on another body of the same build, for when `l`'s body
+--- failed to load. `n` picks the n-th stand-in; nil when they run out.
+function Looks.substitute(l: Look, n: number): Look?
+	for _, group in SUBSTITUTES do
+		local mine = false
+		for _, name in group do
+			if PERSON[name] == l.person then
+				mine = true
+			end
+		end
+		if mine or (group == SUBSTITUTES[1] and l.person == PERSON.emma) then
+			local others = {}
+			for _, name in group do
+				if PERSON[name] ~= l.person then
+					table.insert(others, PERSON[name])
+				end
+			end
+			local person = others[n]
+			if not person then
+				return nil
+			end
+			local c = table.clone(l) :: any
+			c.key = l.key .. "_sub" .. n
+			c.person = person
+			return c
+		end
+	end
+	return nil
+end
 
 function Looks.describe(l: Look): HumanoidDescription
 	local d = Instance.new("HumanoidDescription")
