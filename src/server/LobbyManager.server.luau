@@ -375,6 +375,10 @@ handlers.dismissRejoin = function(player, _party, _payload)
 	end
 end
 
+handlers.cancelMatch = function(player, party, _payload)
+	Launcher.cancel(player, party)
+end
+
 local lastAction: { [Player]: number } = {}
 
 Net.Action.OnServerEvent:Connect(function(player: Player, payload: any)

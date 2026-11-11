@@ -5,8 +5,9 @@
 -- in-game:
 --   1. Lock the parties (status countdown) and tell everyone who they are
 --      playing with.
---   2. Count down. If anyone leaves the server or their party, cancel: parties
---      that were matchmaking go back to searching, the rest back to the menu.
+--   2. Count down. If anyone leaves the server or their party, or presses
+--      cancel, call it off: parties that were matchmaking go back to
+--      searching, the rest (and whoever cancelled) back to the menu.
 --   3. Published game: reserve a fresh server and teleport the whole group in
 --      together (one retry), leaving a rejoin ticket for each player. If the
 --      teleport never happens the parties are released after LAUNCH_TIMEOUT.
@@ -38,6 +39,17 @@ local SPAWN_OFFSETS = {
 }
 
 local Launcher = {}
+
+-- matchId -> the player who called it off during the countdown
+local cancelled: { [string]: Player } = {}
+
+--- `player` backs out of their party's countdown.
+function Launcher.cancel(player: Player, party: Party)
+	local id = party.matchId
+	if party.status == "countdown" and id and not cancelled[id] then
+		cancelled[id] = player
+	end
+end
 
 local function newMatchId(): string
 	return "MATCH-" .. string.sub(HttpService:GenerateGUID(false), 1, 8)
@@ -74,11 +86,11 @@ local function whoLeft(group: { Party }, roster: { [Party]: { Player } }): strin
 end
 
 --- Put the group's parties back where they were before the match was found.
-local function release(group: { Party }, wasSearching: { [Party]: number? }, matchId: string)
+local function release(group: { Party }, wasSearching: { [Party]: number? }, matchId: string, quitter: Party?)
 	for _, party in group do
 		if Parties.byId(party.id) and party.matchId == matchId then
 			local since = wasSearching[party]
-			if since and party.fill and #party.members < party.mode then
+			if since and party ~= quitter and party.fill and #party.members < party.mode then
 				Parties.setStatus(party, "searching")
 				party.searchSince = since -- keep their place in line
 			else
@@ -178,16 +190,28 @@ function Launcher.begin(group: { Party })
 		})
 	end
 
+	-- checked every tenth of a second so cancel lands at once
 	for remaining = COUNTDOWN_SECONDS, 1, -1 do
 		Net.sendAll(players, { type = "countdown", remaining = remaining, names = names })
-		task.wait(1)
-		local gone = whoLeft(group, roster)
-		if gone then
-			release(group, wasSearching, matchId)
-			Net.sendAll(players, { type = "cancelled", reason = gone .. " left. Match cancelled." })
-			return
+		for _ = 1, 10 do
+			task.wait(0.1)
+			local quitter = cancelled[matchId]
+			if quitter then
+				cancelled[matchId] = nil
+				release(group, wasSearching, matchId, Parties.of(quitter))
+				Net.sendAll(players, { type = "cancelled", reason = quitter.DisplayName .. " cancelled. Match called off." })
+				return
+			end
+			local gone = whoLeft(group, roster)
+			if gone then
+				cancelled[matchId] = nil
+				release(group, wasSearching, matchId)
+				Net.sendAll(players, { type = "cancelled", reason = gone .. " left. Match cancelled." })
+				return
+			end
 		end
 	end
+	cancelled[matchId] = nil
 
 	for _, party in group do
 		Parties.setStatus(party, "launching")
