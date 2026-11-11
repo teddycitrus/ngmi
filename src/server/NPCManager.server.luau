@@ -317,8 +317,108 @@ end
 -- cadence. Slower than this and the long default stride turns into slow motion.
 local STROLL_MIN, STROLL_MAX = 8, 9.5
 
+-- Personal space while walking. A character inside AVOID_RANGE that sits ahead
+-- and within AVOID_LANE of the line of travel makes the NPC step SIDESTEP studs
+-- to the side; once it is clear, the NPC heads back to the leg it was on.
+local AVOID_RANGE = 7
+local AVOID_LANE = 3.5
+local SIDESTEP = 3.5
+local STEER_TICK = 0.1
+local ARRIVE = 2 -- studs (flat) that count as reaching a leg's end
+local STALL_SECONDS = 3
+
+local function flat(v: Vector3): Vector3
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+--- Root parts of every other walking character: players and the other NPCs.
+local function otherRoots(self: Model): { BasePart }
+	local out = {}
+	for _, p in Players:GetPlayers() do
+		local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+		if r and r:IsA("BasePart") then
+			table.insert(out, r)
+		end
+	end
+	for _, m in CollectionService:GetTagged("NPC") do
+		if m ~= self and m:IsA("Model") then
+			local r = m:FindFirstChild("HumanoidRootPart")
+			if r and r:IsA("BasePart") then
+				table.insert(out, r)
+			end
+		end
+	end
+	return out
+end
+
+--- The sidestep target for this tick, or nil when the lane ahead is clear.
+local function detour(model: Model, root: BasePart, goal: Vector3): Vector3?
+	local pos = root.Position
+	local toGoal = flat(goal - pos)
+	if toGoal.Magnitude < 0.5 then
+		return nil
+	end
+	local dir = toGoal.Unit
+	local nearest: Vector3?, nearestAhead = nil, math.huge
+	for _, r in otherRoots(model) do
+		local off = flat(r.Position - pos)
+		local ahead = off:Dot(dir)
+		-- only characters in front, closer than the goal, inside the lane
+		if ahead > 0 and ahead < math.min(AVOID_RANGE, toGoal.Magnitude + 1) and ahead < nearestAhead then
+			if (off - dir * ahead).Magnitude < AVOID_LANE then
+				nearest, nearestAhead = off, ahead
+			end
+		end
+	end
+	if not nearest then
+		return nil
+	end
+	-- step to the side the other character is NOT on; if that side is walled
+	-- off, try the other one; if both are, hold still and let them pass
+	local right = Vector3.new(-dir.Z, 0, dir.X)
+	local sides = if nearest:Dot(right) > 0 then { -right, right } else { right, -right }
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignore: { Instance } = { model }
+	for _, r in otherRoots(model) do
+		if r.Parent then
+			table.insert(ignore, r.Parent)
+		end
+	end
+	params.FilterDescendantsInstances = ignore
+	for _, side in sides do
+		local step = side * SIDESTEP + dir * math.max(nearestAhead, 2)
+		if not workspace:Raycast(pos, step, params) then
+			return pos + step
+		end
+	end
+	return pos
+end
+
+--- Walk to `goal` in a straight leg, sidestepping anyone in the way. Returns
+--- false if the NPC makes no headway for STALL_SECONDS.
+local function steerTo(humanoid: Humanoid, root: BasePart, goal: Vector3): boolean
+	local model = humanoid.Parent :: Model
+	local best = flat(goal - root.Position).Magnitude
+	local lastGain = os.clock()
+	while humanoid.Health > 0 and root.Parent do
+		local dist = flat(goal - root.Position).Magnitude
+		if dist <= ARRIVE then
+			return true
+		end
+		if dist < best - 0.5 then
+			best, lastGain = dist, os.clock()
+		elseif os.clock() - lastGain > STALL_SECONDS then
+			return false
+		end
+		humanoid:MoveTo(detour(model, root, goal) or goal)
+		task.wait(STEER_TICK)
+	end
+	return false
+end
+
 --- Follow a computed path to `target`. Returns false if there is no path or a
---- leg stalls (blocked by a player, a door leaf, a new obstacle).
+--- leg stalls (blocked by a wall, a door leaf, a new obstacle).
 local function strollTo(humanoid: Humanoid, root: BasePart, target: Vector3): boolean
 	local path = PathfindingService:CreatePath({
 		AgentRadius = 1.6,
@@ -338,8 +438,7 @@ local function strollTo(humanoid: Humanoid, root: BasePart, target: Vector3): bo
 	local reached = true
 	for i, wp in path:GetWaypoints() do
 		if i > 1 then
-			humanoid:MoveTo(wp.Position)
-			if not humanoid.MoveToFinished:Wait() then
+			if not steerTo(humanoid, root, wp.Position) then
 				reached = false
 				break
 			end
@@ -516,7 +615,7 @@ local function startBarks(runtime: NPCRuntime)
 	if not model then
 		return
 	end
-	-- Barks are published as attributes; BarkCaption on the client shows
+	-- Barks are published as attributes; PromptCaption on the client shows
 	-- "Name: line" as a screen caption to players within earshot.
 	model:SetAttribute("SpeakerName", string.match(def.displayName, "^%S+") or def.displayName)
 
@@ -642,8 +741,7 @@ local function endTalk(runtime: NPCRuntime?)
 		awayDir = awayDir.Unit
 		-- turn to face away, then stroll off
 		root.CFrame = CFrame.lookAt(pos, pos + awayDir)
-		humanoid:MoveTo(pos + awayDir * 12)
-		humanoid.MoveToFinished:Wait()
+		steerTo(humanoid, root, pos + awayDir * 12)
 	end)
 
 	-- Resume gentle idle wandering once the chat is over.
