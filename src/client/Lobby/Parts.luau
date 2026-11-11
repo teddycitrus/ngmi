@@ -227,12 +227,13 @@ end
 
 --- Keep every other ScreenGui (hotbar, meters) disabled until the returned
 --- function is called, which turns back on exactly the ones it turned off.
---- Names in `keep` are left alone.
+--- Names in `keep` are left alone, and so is anything marked CutsceneExempt
+--- (the dot cursor, which the menu needs).
 function Parts.holdHud(playerGui: Instance, keep: { [string]: boolean }): () -> ()
 	local hidden: { ScreenGui } = {}
 	local conns: { RBXScriptConnection } = {}
 	local function hold(g: Instance)
-		if not g:IsA("ScreenGui") or keep[g.Name] then
+		if not g:IsA("ScreenGui") or keep[g.Name] or g:GetAttribute("CutsceneExempt") then
 			return
 		end
 		local sg = g :: ScreenGui
