@@ -16,7 +16,7 @@
 
 local WorldIndex = {}
 
-WorldIndex.HIDDEN_GUIS = { DeskBeaconLabel = true, BarkBubble = true, MutterBubble = true } :: { [string]: boolean }
+WorldIndex.HIDDEN_GUIS = { DeskBeaconLabel = true, MutterBubble = true } :: { [string]: boolean }
 WorldIndex.HIDDEN_PARTS = { DeskBeaconPillar = true } :: { [string]: boolean }
 
 local targets: { [Instance]: boolean } = {}

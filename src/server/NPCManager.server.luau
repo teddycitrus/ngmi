@@ -516,45 +516,18 @@ local function startBarks(runtime: NPCRuntime)
 	if not model then
 		return
 	end
-	local head = model:FindFirstChild("Head") :: BasePart?
-	if not head then
-		return
-	end
-
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "BarkBubble"
-	billboard.Adornee = head
-	billboard.Size = UDim2.new(0, 240, 0, 50)
-	billboard.StudsOffset = Vector3.new(0, 2.8, 0)
-	billboard.AlwaysOnTop = true
-	billboard.MaxDistance = 35
-	billboard.Parent = head
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
-	label.BackgroundTransparency = 1
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.Font = Enum.Font.GothamMedium
-	label.TextScaled = true
-	label.Text = ""
-	label.TextTransparency = 1
-	label.Parent = billboard
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = label
+	-- Barks are published as attributes; BarkCaption on the client shows
+	-- "Name: line" as a screen caption to players within earshot.
+	model:SetAttribute("SpeakerName", string.match(def.displayName, "^%S+") or def.displayName)
 
 	runtime.barkThread = task.spawn(function()
 		local lines = def.idleBarks :: { string }
 		while runtime.isActive and runtime.model do
 			task.wait(math.random(7, 15))
 			if runtime.isActive and (runtime.state == "IDLE" or runtime.state == "WALKING") then
-				label.Text = lines[math.random(#lines)]
-				label.TextTransparency = 0
-				label.BackgroundTransparency = 0.25
+				model:SetAttribute("Bark", lines[math.random(#lines)])
 				task.wait(3.5)
-				label.TextTransparency = 1
-				label.BackgroundTransparency = 1
+				model:SetAttribute("Bark", nil)
 			end
 		end
 	end)
@@ -564,6 +537,9 @@ local function stopBarks(runtime: NPCRuntime)
 	if runtime.barkThread then
 		task.cancel(runtime.barkThread)
 		runtime.barkThread = nil
+	end
+	if runtime.model then
+		runtime.model:SetAttribute("Bark", nil)
 	end
 end
 

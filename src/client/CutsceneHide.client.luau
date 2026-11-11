@@ -3,7 +3,7 @@
 -- CutsceneHide.client.luau
 -- Hides world-space UI while a cutscene owns the camera: the "your desk"
 -- beacon (DeskBeacon's pillar and label) and NPC overhead speech (NPCManager's
--- BarkBubble and MutterBubble). Every cutscene (CinematicCamera, CutsceneManager)
+-- MutterBubble). Idle barks are a screen caption that PromptCaption hides itself. Every cutscene (CinematicCamera, CutsceneManager)
 -- switches the camera to Scriptable, so that is the signal. Changes are local:
 -- the server's billboards stay enabled for everyone else.
 --------------------------------------------------------------------------------
